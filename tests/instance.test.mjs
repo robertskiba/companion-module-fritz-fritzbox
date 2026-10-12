@@ -1,0 +1,462 @@
+// End-to-end checks: the real module instance against a fake FRITZ!Box, through Companion's
+// instance contract. This is the level at which "it connects" can actually be verified.
+import { startFakeBox, USER, PASSWORD } from './fakebox.mjs'
+const D = '../dist'
+const ModuleInstance = (await import(`${D}/main.js`)).default
+
+let failures = 0
+const check = (name, cond, detail = '') => {
+	if (cond) console.log(`  PASS  ${name}`)
+	else {
+		failures++
+		console.log(`  FAIL  ${name} ${detail}`)
+	}
+}
+
+const waitFor = async (predicate, what, timeoutMs = 8000) => {
+	const deadline = Date.now() + timeoutMs
+	while (Date.now() < deadline) {
+		if (predicate()) return true
+		await new Promise((r) => setTimeout(r, 25))
+	}
+	console.log(`  (timed out waiting for ${what})`)
+	return false
+}
+
+/** A stand-in for what Companion hands a module instance. */
+function makeContext() {
+	const record = {
+		statuses: [],
+		logs: [],
+		variables: {},
+		variableDefinitions: {},
+		presets: {},
+		actions: {},
+		feedbacks: {},
+		checked: [],
+	}
+	const context = {
+		_isInstanceContext: true,
+		id: 'test-instance',
+		label: 'fritz',
+		upgradeScripts: [],
+		saveConfig: () => {},
+		updateStatus: (status, message) => record.statuses.push({ status, message }),
+		oscSend: () => {},
+		recordAction: () => {},
+		setActionDefinitions: (actions) => {
+			record.actions = actions
+		},
+		subscribeActions: () => {},
+		unsubscribeActions: () => {},
+		setFeedbackDefinitions: (feedbacks) => {
+			record.feedbacks = feedbacks
+		},
+		subscribeFeedbacks: () => {},
+		unsubscribeFeedbacks: () => {},
+		checkFeedbacks: (...ids) => record.checked.push(...ids),
+		checkAllFeedbacks: () => {},
+		checkFeedbacksById: () => {},
+		setPresetDefinitions: (structure, presets) => {
+			record.presets = presets
+			record.presetStructure = structure
+		},
+		setVariableDefinitions: (definitions) => {
+			record.variableDefinitions = definitions
+		},
+		setVariableValues: (values) => Object.assign(record.variables, values),
+		getVariableValue: (id) => record.variables[id],
+		sharedUdpSocketHandlers: new Map(),
+	}
+	return { context, record }
+}
+
+/** Builds an instance with its logging captured, the way Companion would start it. */
+async function startInstance(port, overrides = {}, password = PASSWORD) {
+	const { context, record } = makeContext()
+	const instance = new ModuleInstance(context)
+	// The fake box serves TR-064 on its one port instead of 49000.
+	const { tr064PlainPort = port, ...config } = overrides
+	instance.tr064PlainPort = tr064PlainPort
+	instance.log = (level, message) => record.logs.push({ level, message })
+	instance.updateStatus = (status, message) => record.statuses.push({ status, message })
+	instance.setVariableValues = (values) => Object.assign(record.variables, values)
+	instance.setVariableDefinitions = (definitions) => {
+		record.variableDefinitions = definitions
+	}
+	instance.setActionDefinitions = (actions) => {
+		record.actions = actions
+	}
+	instance.setFeedbackDefinitions = (feedbacks) => {
+		record.feedbacks = feedbacks
+	}
+	instance.setPresetDefinitions = (structure, presets) => {
+		record.presets = presets
+		record.presetStructure = structure
+	}
+	instance.checkFeedbacks = (...ids) => record.checked.push(...ids)
+	Object.defineProperty(instance, 'label', { get: () => 'fritz' })
+
+	await instance.init(
+		{
+			host: `http://127.0.0.1:${port}`,
+			username: USER,
+			pollInterval: 60,
+			smartHomeInterval: 60,
+			...config,
+		},
+		true,
+		{ password },
+	)
+	return { instance, record }
+}
+
+/** Runs a feedback callback the way Companion would. */
+const feedback = (record, id, options) => record.feedbacks[id].callback({ id: 'x', feedbackId: id, options })
+const runAction = (record, id, options) => record.actions[id].callback({ id: 'x', actionId: id, options })
+const lastStatus = (record) => record.statuses.at(-1)
+
+console.log('Router status and smart home against a working box')
+{
+	const box = await startFakeBox()
+	const { instance, record } = await startInstance(box.port)
+
+	await waitFor(() => record.variables.device_connected === 'true', 'router connection')
+	await waitFor(() => record.variables.smarthome_units === 3, 'smart home overview')
+
+	check('status ends up ok', lastStatus(record)?.status === 'ok', JSON.stringify(record.statuses))
+	check(
+		'model and firmware read',
+		record.variables.device_model === 'FRITZ!Box 7590 AX' && record.variables.device_firmware === '256.08.20',
+	)
+	check(
+		'internet connected',
+		record.variables.connection_wan1_connected === 'true' && record.variables.connection_wan1_status === 'Connected',
+	)
+	check('external IPv4 via the PPP service', record.variables.connection_wan1_ipv4 === '203.0.113.7')
+	check(
+		'throughput from the online monitor',
+		record.variables.connection_wan1_rate_down_mbit === 10 && record.variables.connection_wan1_rate_up_mbit === 0.5,
+	)
+	check('line rate in Mbit/s', record.variables.connection_wan1_line_down_mbit === 116.8)
+	check(
+		'DSL values scaled',
+		record.variables.connection_dsl_snr_down_db === 9.5 && record.variables.connection_dsl_sync_down_mbit === 116.8,
+	)
+	check(
+		'WLAN instances read',
+		record.variables.wlan_5ghz_ssid === 'Studio 5' && record.variables.wlan_5ghz_band === '5 GHz',
+	)
+	check(
+		'guest WLAN detected',
+		record.variables.wlan_guest_ssid === 'Gäste & Co' && record.variables.wlan_guest_enabled === 'false',
+	)
+	check('WLAN clients summed', record.variables.wlan_clients_total === 10)
+	check('hosts counted', record.variables.lan_hosts_active === 1 && record.variables.lan_hosts_known === 2)
+	check('IPv6 stays empty without UPnP status', record.variables.connection_wan1_ipv6 === '')
+	check('missing IGD is not an error', !record.logs.some((l) => l.level === 'error'), JSON.stringify(record.logs))
+	check(
+		'mobile stick is WAN 2',
+		record.variables.connection_wan2_type === 'Mobile' && record.variables.connection_wan2_connected === 'true',
+	)
+	check(
+		'mobile details',
+		record.variables.connection_mobile_technology === 'LTE' &&
+			record.variables.connection_mobile_signal_rsrp === -97 &&
+			record.variables.connection_mobile_provider === 'Vodafone',
+	)
+	check(
+		'fibre optical power in dBm',
+		record.variables.connection_fiber_rx_power_dbm === -18.45 && record.variables.connection_fiber_mode === 'XGSPON',
+	)
+	check('cable DVB-C', record.variables.connection_cable_dvbc_enabled === 'true')
+	check(
+		'optional groups are defined',
+		'connection_dsl_status' in record.variableDefinitions && 'connection_wan2_type' in record.variableDefinitions,
+	)
+	check('WAN 1 type is readable', record.variables.connection_wan1_type === 'DSL')
+	check('uptime published', record.variables.device_uptime_seconds >= 3725)
+
+	check('variables per unit by UID', record.variables['smarthome_11630_0015376_power'] === 123.45)
+	check('variables per unit by name', record.variables.smarthome_steckdose_regie_on === 'false')
+	check('thermostat variables', record.variables.smarthome_heizung_saal_setpoint === 21)
+	check('unit variables are defined', 'smarthome_fenster_saal_alert' in record.variableDefinitions)
+	check('WLAN variables are defined', 'wlan_guest_ssid' in record.variableDefinitions)
+
+	check('feedback: internet connected', feedback(record, 'internet_connected', {}) === true)
+	check('feedback: guest WLAN off', feedback(record, 'wlan_enabled', { wlan: 'guest' }) === false)
+	check('feedback: host active by name', feedback(record, 'host_active', { host: 'playout-pc' }) === true)
+	check('feedback: host inactive by MAC', feedback(record, 'host_active', { host: 'aa:bb:cc:00:00:02' }) === false)
+	check(
+		'feedback: throughput above 5 Mbit/s',
+		feedback(record, 'throughput', { direction: 'down', comparison: 'above', mbit: 5 }) === true,
+	)
+	check('feedback: window open', feedback(record, 'sh_alert', { unit: '13077 0137031-1', alert: 'open' }) === true)
+	check('feedback: battery low', feedback(record, 'sh_battery_low', { unit: '13077 0137031-1' }) === true)
+	check(
+		'feedback: power reading',
+		feedback(record, 'sh_reading', { unit: '11630 0015376', reading: 'power', comparison: 'above', value: 100 }) ===
+			true,
+	)
+	check(
+		'feedback: routine enabled',
+		feedback(record, 'sh_trigger_enabled', { trigger: 'trg9D4BAB-3FC9C824E' }) === true,
+	)
+
+	const unitChoices = record.actions.sh_switch.options[0].choices.map((c) => c.id)
+	check('switch action lists only switchable units', unitChoices.length === 1 && unitChoices[0] === '11630 0015376')
+	const templateChoices = record.actions.sh_apply_template.options[0].choices.map((c) => c.id)
+	check(
+		'auto-created templates are hidden',
+		templateChoices.length === 1 && templateChoices[0] === 'tmp9D4BAB-3F42B59F6',
+	)
+	check(
+		'presets for units exist',
+		'sh_11630_0015376_toggle' in record.presets && 'sh_09995_0123456_thermostat' in record.presets,
+	)
+	check(
+		'presets reference the label',
+		record.presets.status_internet.style.text.includes('$(fritz:connection_wan1_status)'),
+	)
+
+	// Toggle the socket: the module reads the cached state and writes the opposite.
+	await runAction(record, 'sh_switch', { unit: '11630 0015376', mode: 'toggle' })
+	check(
+		'toggle sends on',
+		box.state.puts.at(-1)?.uid === '11630 0015376' && box.state.puts.at(-1)?.update.onOffInterface?.active === true,
+		JSON.stringify(box.state.puts),
+	)
+	await waitFor(
+		() => record.variables.smarthome_steckdose_regie_on === 'true',
+		'state read back after the action',
+		3000,
+	)
+	check('state is read back after an action', record.variables.smarthome_steckdose_regie_on === 'true')
+	check('feedback follows', feedback(record, 'sh_on', { unit: '11630 0015376' }) === true)
+
+	await runAction(record, 'sh_setpoint', { unit: 'Heizung Saal', mode: 'increase', value: 0.5 })
+	const setPoint = box.state.puts.at(-1)?.update.thermostatInterface?.setPointTemperature
+	check(
+		'setpoint raised by half a degree',
+		setPoint?.mode === 'temperature' && setPoint?.celsius === 21.5,
+		JSON.stringify(setPoint),
+	)
+
+	await runAction(record, 'sh_setpoint', { unit: '09995 0123456', mode: 'off', value: 0 })
+	check('thermostat off', box.state.puts.at(-1)?.update.thermostatInterface?.setPointTemperature?.mode === 'off')
+
+	await runAction(record, 'sh_boost', { unit: '09995 0123456', mode: 'on', minutes: 15 })
+	const boost = box.state.puts.at(-1)?.update.thermostatInterface?.boost
+	const expectedEnd = Math.floor(Date.now() / 1000) + 900
+	check(
+		'boost with end time',
+		boost?.enabled === true && Math.abs(boost.endTime - expectedEnd) <= 2,
+		JSON.stringify(boost),
+	)
+
+	await runAction(record, 'sh_apply_template', { template: 'tmp9D4BAB-3F42B59F6' })
+	check('template applied', box.state.templatesApplied.at(-1) === 'tmp9D4BAB-3F42B59F6')
+
+	const putsBefore = box.state.puts.length
+	await runAction(record, 'sh_switch', { unit: 'does-not-exist', mode: 'on' })
+	check('unknown unit is not sent', box.state.puts.length === putsBefore)
+	check(
+		'unknown unit is logged',
+		record.logs.some((l) => l.level === 'warn' && l.message.includes('does-not-exist')),
+	)
+
+	await runAction(record, 'wan_reconnect', {})
+	check('reconnect terminates the PPP connection', box.state.reconnects === 1)
+	check(
+		'reconnect is logged',
+		record.logs.some((l) => l.level === 'info' && /Reconnect/.test(l.message)),
+	)
+	await waitFor(() => record.variables.connection_wan1_ipv4 === '198.51.100.23', 'new IP after the reconnect', 9000)
+	check('the new IP address is read after the reconnect', record.variables.connection_wan1_ipv4 === '198.51.100.23')
+
+	check('one login served everything', box.state.loginAttempts === 1, `attempts ${box.state.loginAttempts}`)
+
+	// An expired session: the box forgets the SID, the module logs in again by itself.
+	box.state.sids.clear()
+	await runAction(record, 'refresh', {})
+	check('expired SID is renewed transparently', box.state.loginAttempts === 2 && record.variables.smarthome_units === 3)
+
+	await instance.destroy()
+	check('logout on destroy', box.state.sids.size === 0)
+	await box.close()
+}
+
+console.log('Box away for a while, e.g. the nightly reconnect over MyFRITZ!')
+{
+	let box = await startFakeBox()
+	const port = box.port
+	const { instance, record } = await startInstance(port)
+	await waitFor(() => record.variables.device_connected === 'true', 'first connection')
+	await waitFor(() => record.variables.smarthome_units === 3, 'smart home')
+
+	// The box disappears: connections are cut and nothing answers any more.
+	await box.close()
+	await runAction(record, 'refresh', {})
+	check(
+		'outage is noticed',
+		record.variables.device_connected === 'false' && lastStatus(record)?.status === 'connection_failure',
+		JSON.stringify(lastStatus(record)),
+	)
+	await runAction(record, 'refresh', {})
+	const outageLogs = record.logs.filter((l) => l.level !== 'debug' && /not reachable/.test(l.message)).length
+	check('the outage is logged once, not on every poll', outageLogs === 1, `${outageLogs} times`)
+
+	// It comes back with a fresh state, as after a restart: the old session is unknown there.
+	box = await startFakeBox({ port })
+	await runAction(record, 'refresh', {})
+	check(
+		'router status resumes by itself',
+		record.variables.device_connected === 'true',
+		JSON.stringify(record.statuses.slice(-3)),
+	)
+	check('smart home resumes with a new login', record.variables.smarthome_units === 3 && box.state.loginAttempts === 1)
+	check('status is ok again', lastStatus(record)?.status === 'ok', JSON.stringify(lastStatus(record)))
+	check('the recovery is logged', record.logs.filter((l) => /Connected to/.test(l.message)).length === 2)
+	await instance.destroy()
+	await box.close()
+}
+
+console.log('Wrong password')
+{
+	const box = await startFakeBox()
+	const { instance, record } = await startInstance(box.port, {}, 'wrong')
+	await waitFor(() => lastStatus(record)?.status === 'authentication_failure', 'authentication failure')
+	check(
+		'status is authentication failure',
+		lastStatus(record)?.status === 'authentication_failure',
+		JSON.stringify(record.statuses),
+	)
+	check(
+		'the reason is logged',
+		record.logs.some((l) => l.level === 'error' && /refused/.test(l.message)),
+	)
+	check('not connected', record.variables.device_connected === 'false')
+	await waitFor(() => box.state.loginAttempts > 0, 'smart home login attempt')
+	const attempts = box.state.loginAttempts
+	await runAction(record, 'refresh', {})
+	await runAction(record, 'refresh', {})
+	check(
+		'a refused login is not retried at once',
+		box.state.loginAttempts === attempts,
+		`attempts ${box.state.loginAttempts}`,
+	)
+	await instance.destroy()
+	await box.close()
+}
+
+console.log('Box not ready at the first poll')
+{
+	const box = await startFakeBox({ descriptionFailures: 1 })
+	const { instance, record } = await startInstance(box.port, { smartHomeInterval: 0 })
+	await waitFor(() => lastStatus(record)?.status === 'connection_failure', 'first poll failing')
+	await runAction(record, 'refresh', {})
+	check('connects on the next poll', record.variables.device_connected === 'true')
+	check('the internet service is still found', record.variables.connection_wan1_ipv4 === '203.0.113.7')
+	check('connection status still read', record.variables.connection_wan1_status === 'Connected')
+	await instance.destroy()
+	await box.close()
+}
+
+console.log('Box reached over MyFRITZ!-style remote access')
+{
+	const box = await startFakeBox({ remote: true })
+	// Nothing answers on the plain TR-064 port, as over the internet.
+	const { instance, record } = await startInstance(box.port, {
+		host: `https://127.0.0.1:${box.port}`,
+		tr064PlainPort: 1,
+	})
+	await waitFor(() => record.variables.device_connected === 'true', 'router connection over the remote access port')
+	await waitFor(() => record.variables.smarthome_units === 3, 'smart home over the remote access port')
+	check(
+		'router status read over HTTPS',
+		record.variables.device_model === 'FRITZ!Box 7590 AX',
+		JSON.stringify(record.logs),
+	)
+	check(
+		'TR-064 used the /tr064 prefix',
+		box.state.paths.some((p) => p.startsWith('/tr064/upnp/control/')),
+	)
+	check('no TR-064 request without the prefix', !box.state.paths.some((p) => p.startsWith('/upnp/')))
+	check('host list fetched below /tr064', record.variables.lan_hosts_known === 2)
+	check('no IGD request on the remote route', !box.state.paths.some((p) => p.includes('igddesc')))
+	check('smart home over the same port', record.variables.smarthome_steckdose_regie_power === 123.45)
+	check('web_url keeps the port', record.variables.device_web_url === `https://127.0.0.1:${box.port}`)
+	check('status ok', lastStatus(record)?.status === 'ok', JSON.stringify(lastStatus(record)))
+	await instance.destroy()
+	await box.close()
+}
+
+console.log('Remote access with a wrong password')
+{
+	const box = await startFakeBox({ remote: true })
+	const started = Date.now()
+	const { instance, record } = await startInstance(
+		box.port,
+		{ host: `https://127.0.0.1:${box.port}`, tr064PlainPort: 1, smartHomeInterval: 0 },
+		'wrong',
+	)
+	await waitFor(() => lastStatus(record)?.status === 'authentication_failure', 'authentication failure')
+	check(
+		'wrong password over the remote access is an authentication failure',
+		lastStatus(record)?.status === 'authentication_failure',
+		JSON.stringify(record.statuses),
+	)
+	check('the other route is not tried after a refused login', Date.now() - started < 2500, `${Date.now() - started} ms`)
+	await instance.destroy()
+	await box.close()
+}
+
+console.log('Unusable address')
+{
+	const { instance, record } = await startInstance(1, { host: 'ftp://box' })
+	check('status is bad config', lastStatus(record)?.status === 'bad_config')
+	check('the reason names the address', /ftp:\/\/box/.test(lastStatus(record)?.message ?? ''))
+	await instance.destroy()
+}
+
+console.log('Box without Smart Home REST API')
+{
+	const box = await startFakeBox({ smartHome: false })
+	const { instance, record } = await startInstance(box.port)
+	await waitFor(() => record.logs.some((l) => /no Smart Home REST API/.test(l.message)), 'smart home warning')
+	await waitFor(() => record.variables.device_connected === 'true', 'router connection')
+	check('router still works', record.variables.device_connected === 'true')
+	check(
+		'the missing API is explained',
+		record.logs.some((l) => l.level === 'warn' && /8\.20/.test(l.message)),
+	)
+	check(
+		'status is a warning, not an error',
+		lastStatus(record)?.status === 'unknown_warning',
+		JSON.stringify(lastStatus(record)),
+	)
+	await instance.destroy()
+	await box.close()
+}
+
+console.log('Nothing listening')
+{
+	const { instance, record } = await startInstance(1, { smartHomeInterval: 0 })
+	await waitFor(() => lastStatus(record)?.status === 'connection_failure', 'connection failure')
+	check(
+		'status is connection failure',
+		lastStatus(record)?.status === 'connection_failure',
+		JSON.stringify(record.statuses),
+	)
+	await instance.destroy()
+}
+
+console.log('No password')
+{
+	const { instance, record } = await startInstance(1, {}, '')
+	check('status is bad config', lastStatus(record)?.status === 'bad_config')
+	await instance.destroy()
+}
+
+console.log(failures === 0 ? '\nAll checks passed' : `\n${failures} check(s) failed`)
+process.exit(failures === 0 ? 0 : 1)

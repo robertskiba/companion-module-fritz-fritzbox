@@ -1,0 +1,28 @@
+{
+	"$schema": "../node_modules/@companion-module/base/assets/manifest.schema.json",
+	"type": "connection",
+	"id": "fritz-fritzbox",
+	"name": "fritz-fritzbox",
+	"shortname": "FRITZ!Box",
+	"description": "Router status and smart home control for a FRITZ!Box",
+	"version": "0.1.0",
+	"license": "MIT",
+	"repository": "git+https://github.com/bitfocus/companion-module-fritz-fritzbox.git",
+	"bugs": "https://github.com/bitfocus/companion-module-fritz-fritzbox/issues",
+	"maintainers": [
+		{
+			"name": "Robert Skiba",
+			"email": "info@konferenzregie.de"
+		}
+	],
+	"runtime": {
+		"type": "node22",
+		"api": "nodejs-ipc",
+		"apiVersion": "2.0.4",
+		"entrypoint": "../dist/main.js"
+	},
+	"legacyIds": [],
+	"manufacturer": "FRITZ!",
+	"products": ["FRITZ!Box"],
+	"keywords": ["router", "fritzbox", "avm", "tr-064", "smart home", "dect", "network"]
+}
