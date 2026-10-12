@@ -23,6 +23,7 @@ export type ActionsSchema = {
 	sh_apply_template: { options: { template: string } }
 	sh_trigger: { options: { trigger: string; mode: SwitchMode } }
 	wan_reconnect: { options: NoOptions }
+	diagnostics_report: { options: NoOptions }
 	refresh: { options: NoOptions }
 }
 
@@ -417,6 +418,18 @@ export function UpdateActions(self: ModuleInstance): void {
 			options: [],
 			callback: async () => {
 				await self.reconnectWan()
+			},
+		},
+
+		diagnostics_report: {
+			name: 'Write diagnostics report',
+			description:
+				'For beta testers: writes a file with what this box offers and answers into the home folder of ' +
+				'the computer running Companion. The log shows where. Passwords are never included; addresses, ' +
+				'names and serial numbers are replaced by placeholders.',
+			options: [],
+			callback: async () => {
+				await self.writeDiagnostics()
 			},
 		},
 

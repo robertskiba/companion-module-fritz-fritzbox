@@ -215,6 +215,11 @@ export class SmartHomeClient {
 		}
 	}
 
+	/** The overview as the box sent it, every field included, for the diagnostics report. */
+	async rawOverview(): Promise<unknown> {
+		return this.#json<unknown>('GET', '/overview')
+	}
+
 	async updateUnit(uid: string, interfaces: ShUnitUpdate): Promise<void> {
 		await this.#json('PUT', `/overview/units/${encodeURIComponent(uid)}`, { interfaces })
 	}

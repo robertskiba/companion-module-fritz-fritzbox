@@ -52,11 +52,11 @@ const HARMLESS_KEYS = /(failurecount|numberofentries|macaddresscontrolenabled|^i
 export class Anonymizer {
 	readonly #map = new Map<string, string>()
 	readonly #counters = new Map<string, number>()
-	readonly #extra: string[]
+	readonly #extra: { kind: string; value: string }[]
 
-	/** Further values to hide wherever they appear, e.g. the configured host name. */
-	constructor(extra: string[] = []) {
-		this.#extra = extra.filter((value) => value.length >= 3)
+	/** Further values to hide wherever they appear, e.g. the configured host name as HOST. */
+	constructor(extra: { kind: string; value: string }[] = []) {
+		this.#extra = extra.filter((entry) => entry.value.length >= 3)
 	}
 
 	placeholder(kind: string, value: string): string {
@@ -73,8 +73,8 @@ export class Anonymizer {
 	/** Masks addresses and the extra values inside free text. */
 	text(value: string): string {
 		let result = value
-		for (const extra of this.#extra) {
-			result = result.split(extra).join(this.placeholder('HOST', extra))
+		for (const { kind, value: extra } of this.#extra) {
+			if (result.includes(extra)) result = result.split(extra).join(this.placeholder(kind, extra))
 		}
 		result = result.replace(/\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b/gi, (mac) =>
 			this.placeholder('MAC', mac.toUpperCase().replace(/-/g, ':')),

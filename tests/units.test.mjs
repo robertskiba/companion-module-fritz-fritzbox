@@ -15,6 +15,7 @@ const { describeErrors } = await import(`${D}/smarthome.js`)
 const { parseAddress, isHomeNetworkHost, webUrlFor } = await import(`${D}/config.js`)
 const { tr064Routes } = await import(`${D}/main.js`)
 const { listFilePath, connectedProvider } = await import(`${D}/router.js`)
+const { Anonymizer, scrubPath, reportFileName, ExchangeLog } = await import(`${D}/diagnostics.js`)
 const { wlanKeys, hasWan2, accessTypeLabel } = await import(`${D}/variables.js`)
 const { initialOverview } = await import('./fakebox.mjs')
 
@@ -311,6 +312,56 @@ eq(
 		'<Cell><Connected>none</Connected><Provider>A</Provider></Cell><Cell><Connected>primary</Connected><Provider>B &amp; C</Provider></Cell>',
 	),
 	'B & C',
+)
+
+// --- Diagnostics ---
+const anon = new Anonymizer([
+	{ kind: 'HOST', value: 'au91ljzqvowe5ljt.myfritz.net' },
+	{ kind: 'USER', value: 'companion' },
+])
+const masked = anon.value({
+	NewSSID: 'Studio',
+	NewBSSID: '3C:A6:2F:00:00:01',
+	NewExternalIPAddress: '203.0.113.7',
+	NewSerialNumber: '3810D5000001',
+	NewPPPUsername: 'h12345@t-online.de',
+	NewPINFailureCount: '0',
+	NewMACAddressControlEnabled: '0',
+	message: 'Login as "companion" refused at https://au91ljzqvowe5ljt.myfritz.net:43167 from 192.168.178.20 (fd00::1)',
+	units: [{ name: 'Küche' }, { name: 'Bad' }, { name: 'Küche' }],
+	celsius: 21.5,
+})
+eq(
+	'sensitive keys get placeholders',
+	[masked.NewSSID, masked.NewBSSID, masked.NewSerialNumber, masked.NewPPPUsername],
+	['SSID#1', 'SSID#2', 'ID#1', 'USER#1'],
+)
+eq('IP addresses are masked by pattern', masked.NewExternalIPAddress, 'IP#1')
+eq('counts and flags are kept', [masked.NewPINFailureCount, masked.NewMACAddressControlEnabled], ['0', '0'])
+eq('free text is masked', masked.message, 'Login as "USER#2" refused at https://HOST#1:43167 from IPv4#1 (IPv6#1)')
+eq(
+	'the same value keeps its placeholder',
+	masked.units.map((unit) => unit.name),
+	['NAME#1', 'NAME#2', 'NAME#1'],
+)
+eq('numbers stay numbers', masked.celsius, 21.5)
+eq(
+	'session ids are scrubbed from paths',
+	scrubPath('/devicehostlist.lua?sid=0123456789abcdef&x=1'),
+	'/devicehostlist.lua?sid=***&x=1',
+)
+eq('report file name', reportFileName(new Date(2026, 9, 12, 8, 5, 3)), 'fritzbox-diagnostics-2026-10-12_08-05-03.json')
+const exchanges = new ExchangeLog(3)
+for (let i = 0; i < 5; i++) exchanges.add({ time: '', method: 'GET', target: `/x?sid=${i}abc`, ms: i })
+eq(
+	'the request log keeps only the newest entries, scrubbed',
+	exchanges.entries().map((e) => e.target),
+	['/x?sid=***', '/x?sid=***', '/x?sid=***'],
+)
+eq(
+	'the request log drops the oldest',
+	exchanges.entries().map((e) => e.ms),
+	[2, 3, 4],
 )
 
 console.log(failures === 0 ? '\nAll checks passed' : `\n${failures} check(s) failed`)

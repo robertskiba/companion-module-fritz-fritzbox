@@ -19,7 +19,9 @@ import { UpgradeScripts } from './upgrades.js'
 import { UpdateActions, type ActionsSchema } from './actions.js'
 import { UpdateFeedbacks, type FeedbacksSchema } from './feedbacks.js'
 import { UpdatePresets } from './presets.js'
-import { HttpTransportError } from './http.js'
+import { HttpTransportError, setHttpObserver } from './http.js'
+import { Anonymizer, collectTr064, ExchangeLog, writeReport } from './diagnostics.js'
+import { readFile } from 'node:fs/promises'
 import { createRouterState, RouterReader, type ReadProblem, type RouterState } from './router.js'
 import { FritzSession, LoginRefusedError, type WebEndpoint } from './session.js'
 import { SmartHomeClient, SmartHomeError } from './smarthome.js'
@@ -95,6 +97,10 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 	connected = false
 	/** The plain TR-064 port of the box. A field rather than a constant so tests can use a fake box. */
 	tr064PlainPort = TR064_HTTP_PORT
+	/** Where diagnostics reports go; undefined means the home folder. A field so tests can redirect it. */
+	diagnosticsDir: string | undefined
+	/** The last requests, for diagnostics reports. */
+	readonly #exchanges = new ExchangeLog()
 
 	#session: FritzSession | undefined
 	/** The address field, read; undefined while it holds no usable address. */
@@ -130,6 +136,16 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 	}
 
 	async init(config: ModuleConfig, _isFirstInit: boolean, secrets: ModuleSecrets): Promise<void> {
+		setHttpObserver((observation) =>
+			this.#exchanges.add({
+				time: new Date().toISOString(),
+				method: observation.method,
+				target: `${observation.host}:${observation.port}${observation.path}`,
+				ms: observation.ms,
+				...(observation.status !== undefined ? { status: observation.status } : {}),
+				...(observation.error ? { error: observation.error } : {}),
+			}),
+		)
 		this.config = { ...DEFAULT_CONFIG, ...config }
 		this.secrets = secrets ?? { password: '' }
 		this.#rebuildDefinitions()
@@ -137,6 +153,7 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 	}
 
 	async destroy(): Promise<void> {
+		setHttpObserver(undefined)
 		this.#stop()
 		await this.#session?.logout()
 		this.#session = undefined
@@ -216,6 +233,77 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 				void this.#pollRouter()
 			}, delay),
 		)
+	}
+
+	/**
+	 * Writes a diagnostics report a beta tester can send in: what the box offers and answers,
+	 * the smart home overview as sent, the recent requests and problems. Passwords, session ids and
+	 * digest data never go in; addresses, names and serial numbers are replaced by placeholders.
+	 */
+	async writeDiagnostics(): Promise<string | undefined> {
+		const address = this.#address
+		// The user name can turn up in error messages, the address in request targets.
+		const anonymizer = new Anonymizer([
+			...(address ? [{ kind: 'HOST', value: address.host }] : []),
+			{ kind: 'USER', value: this.config.username },
+		])
+		const report: Record<string, unknown> = {
+			report: 'companion-module-fritz-fritzbox diagnostics',
+			created: new Date().toISOString(),
+			module: await moduleVersion(),
+			node: process.version,
+			platform: `${process.platform} ${process.arch}`,
+			config: {
+				address: address ? webUrlFor(address) : this.config.host,
+				homeNetwork: address?.homeNetwork,
+				userNameSet: this.config.username !== '',
+				passwordSet: this.secrets.password !== '',
+				pollInterval: this.config.pollInterval,
+				smartHomeInterval: this.config.smartHomeInterval,
+			},
+			status: { router: this.#status.router, smartHome: this.#status.smarthome, connected: this.connected },
+			problems: Object.fromEntries(this.#reported),
+		}
+
+		const reader = this.#reader
+		if (reader) {
+			const { https, port, pathPrefix } = reader.tr064.options
+			report.tr064Route = `${https ? 'https' : 'http'}:${port}${pathPrefix ?? ''}`
+			try {
+				report.tr064 = await collectTr064(reader.tr064)
+			} catch (error) {
+				report.tr064 = { error: describe(error) }
+			}
+		} else {
+			report.tr064 = { error: 'TR-064 has not been reached yet' }
+		}
+
+		const client = this.#smartHomeClient
+		const session = this.#session
+		if (client && session) {
+			try {
+				const overview = await client.rawOverview()
+				report.smartHome = { rights: session.rights, overview }
+			} catch (error) {
+				report.smartHome = { error: describe(error) }
+			}
+		} else {
+			report.smartHome = { error: 'Smart home is switched off or not configured' }
+		}
+
+		// Only the router values: smart home variable names carry the device names, and the raw
+		// overview above already holds every smart home value.
+		report.variables = routerVariableValues(this.router)
+		report.recentRequests = this.#exchanges.entries()
+
+		try {
+			const path = await writeReport(anonymizer.value(report), this.diagnosticsDir)
+			this.log('info', `Diagnostics report written to ${path}`)
+			return path
+		} catch (error) {
+			this.log('error', `Diagnostics report could not be written: ${describe(error)}`)
+			return undefined
+		}
 	}
 
 	/** Reads everything at once, for the refresh action. */
@@ -588,6 +676,19 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 		)[0]
 		if (worst) this.updateStatus(worst.status, worst.message ?? null)
 	}
+}
+
+/** The version from the manifest, which sits next to the code both in development and in a package. */
+async function moduleVersion(): Promise<string> {
+	for (const candidate of ['../companion/manifest.json', './companion/manifest.json']) {
+		try {
+			const manifest = JSON.parse(await readFile(new URL(candidate, import.meta.url), 'utf8')) as { version?: string }
+			if (manifest.version) return manifest.version
+		} catch {
+			// Try the next place.
+		}
+	}
+	return 'unknown'
 }
 
 function describeRoute(client: Tr064Client): string {

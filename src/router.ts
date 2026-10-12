@@ -247,6 +247,11 @@ export class RouterReader {
 	readonly #unsupported = new Set<string>()
 	#connectionServiceChecked = false
 
+	/** The TR-064 client in use, for the diagnostics report. */
+	get tr064(): Tr064Client {
+		return this.#tr064
+	}
+
 	constructor(tr064: Tr064Client, igd: Tr064Client | undefined) {
 		this.#tr064 = tr064
 		this.#igd = igd

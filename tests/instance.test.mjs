@@ -1,6 +1,9 @@
 // End-to-end checks: the real module instance against a fake FRITZ!Box, through Companion's
 // instance contract. This is the level at which "it connects" can actually be verified.
 import { startFakeBox, USER, PASSWORD } from './fakebox.mjs'
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 const D = '../dist'
 const ModuleInstance = (await import(`${D}/main.js`)).default
 
@@ -273,6 +276,59 @@ console.log('Router status and smart home against a working box')
 	)
 	await waitFor(() => record.variables.connection_wan1_ipv4 === '198.51.100.23', 'new IP after the reconnect', 9000)
 	check('the new IP address is read after the reconnect', record.variables.connection_wan1_ipv4 === '198.51.100.23')
+
+	// A diagnostics report, as a beta tester would send it in.
+	const reportDir = await mkdtemp(join(tmpdir(), 'fritz-diag-'))
+	instance.diagnosticsDir = reportDir
+	const reportPath = await instance.writeDiagnostics()
+	const files = await readdir(reportDir)
+	check(
+		'diagnostics report written',
+		reportPath !== undefined && files.length === 1 && /^fritzbox-diagnostics-.*\.json$/.test(files[0]),
+	)
+	const reportText = await readFile(join(reportDir, files[0]), 'utf8')
+	const report = JSON.parse(reportText)
+	check(
+		'report holds the box model and firmware',
+		reportText.includes('FRITZ!Box 7590 AX') && reportText.includes('256.08.20'),
+	)
+	check(
+		'report lists the TR-064 services',
+		report.tr064.services.some((s) => s.startsWith('X_AVM-DE_WANFiber1')),
+	)
+	check(
+		'report holds raw answers',
+		report.tr064.results.some(
+			(r) => r.action === 'X_AVM-DE_GetDSLInfo' && r.ok && r.values.NewDownstreamCurrRate === '116790',
+		),
+	)
+	check('report leaves the device log out', !reportText.includes('lots of log lines'))
+	check(
+		'report holds the smart home overview',
+		report.smartHome.overview.units.length === 3 && report.smartHome.rights.HomeAuto === 2,
+	)
+	check('report holds recent requests', report.recentRequests.length > 5)
+	check(
+		'report path is logged',
+		record.logs.some((l) => l.level === 'info' && l.message.includes(reportPath)),
+	)
+	const leaks = {
+		password: PASSWORD,
+		'user name': USER,
+		MAC: 'AA:BB:CC:00:00:01',
+		'external IP': '198.51.100.23',
+		SSID: 'Studio 5',
+		'device name': 'Steckdose Regie',
+		'routine name': 'Abends aus',
+		serial: '3810D5000001',
+		'box address': '127.0.0.1',
+	}
+	for (const [what, value] of Object.entries(leaks)) {
+		check(`report does not contain the ${what}`, !reportText.includes(value))
+	}
+	check('report contains no session id', !/[?&]sid=[0-9a-f]/i.test(reportText) && !reportText.includes('AVM-SID'))
+	check('placeholders keep entries apart', reportText.includes('NAME#1') && reportText.includes('NAME#2'))
+	await rm(reportDir, { recursive: true, force: true })
 
 	check('one login served everything', box.state.loginAttempts === 1, `attempts ${box.state.loginAttempts}`)
 

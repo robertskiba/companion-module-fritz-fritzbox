@@ -2,7 +2,7 @@
 
 Shows the status of a FRITZ!Box router on buttons and controls the smart home devices connected to it: sockets, lamps, thermostats, blinds, contacts and buttons.
 
-> **Beta:** this module has been tested with a real FRITZ!Box. Since boxes differ a lot (DSL, cable, fibre, LTE/5G, smart home devices), we are looking for beta testers. Please report what works and what does not at https://github.com/robertskiba/companion-module-fritz-fritzbox/issues, with the model, FRITZ!OS version, connection type and the log of the connection.
+> **Beta:** this module has been tested with a real FRITZ!Box. Since boxes differ a lot (DSL, cable, fibre, LTE/5G, smart home devices), we are looking for beta testers. Please report what works and what does not at https://github.com/robertskiba/companion-module-fritz-fritzbox/issues, with the model, FRITZ!OS version and connection type, and attach a diagnostics report (see below).
 
 ### Preparing the FRITZ!Box
 
@@ -212,6 +212,10 @@ Actions: switch on, off or toggle; brightness; colour and colour temperature; bl
 Feedbacks: switched on, reachable, alert or contact state, compare a reading (temperature, power, humidity ...), boost, window open mode, battery low, button pressed recently, routine enabled.
 
 Presets are created for every device the box reports.
+
+### Diagnostics report
+
+The action **Write diagnostics report** writes a file named `fritzbox-diagnostics-<date>.json` into the home folder of the computer running Companion; the log shows the exact path. It holds what the box offers and answers over TR-064, the smart home overview as the box sends it, the recent requests and problems, and the router values. Passwords and session ids are never included. IP and MAC addresses, network and device names, serial numbers, the user name and the address of the box are replaced by placeholders such as `IPv4#1`, so the report can be shared as it is.
 
 ### Good to know
 

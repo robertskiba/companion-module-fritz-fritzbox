@@ -19,6 +19,24 @@ export interface HttpRequestOptions {
 	timeout: number
 }
 
+/** What an observer learns about a request: never headers or bodies, so never credentials. */
+export interface HttpObservation {
+	method: string
+	host: string
+	port: number
+	path: string
+	status?: number
+	ms: number
+	error?: string
+}
+
+let observer: ((observation: HttpObservation) => void) | undefined
+
+/** Lets the diagnostics see each request. One module process serves one connection, so one is enough. */
+export function setHttpObserver(fn: ((observation: HttpObservation) => void) | undefined): void {
+	observer = fn
+}
+
 /** A failure to get any answer at all: refused, unreachable, timed out. */
 export class HttpTransportError extends Error {
 	constructor(message: string) {
@@ -36,6 +54,28 @@ export class HttpTransportError extends Error {
  * since a 401 is a normal step of the digest handshake.
  */
 export async function httpCall(options: HttpRequestOptions): Promise<HttpResponse> {
+	const started = Date.now()
+	const note = (status?: number, error?: string): void =>
+		observer?.({
+			method: options.method,
+			host: options.host,
+			port: options.port,
+			path: options.path,
+			ms: Date.now() - started,
+			...(status !== undefined ? { status } : {}),
+			...(error ? { error } : {}),
+		})
+	try {
+		const response = await send(options)
+		note(response.status)
+		return response
+	} catch (error) {
+		note(undefined, error instanceof Error ? error.message : String(error))
+		throw error
+	}
+}
+
+async function send(options: HttpRequestOptions): Promise<HttpResponse> {
 	const headers: Record<string, string> = { ...options.headers }
 	if (options.body !== undefined) headers['Content-Length'] = String(Buffer.byteLength(options.body))
 
