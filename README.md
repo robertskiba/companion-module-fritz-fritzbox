@@ -4,6 +4,21 @@ A [Bitfocus Companion](https://bitfocus.io/companion) module for the FRITZ!Box: 
 
 See [companion/HELP.md](companion/HELP.md) for what it offers and how to set up the box.
 
+The module has been tested with a real FRITZ!Box, in the home network and over MyFRITZ!.
+
+## Beta testers wanted
+
+FRITZ!Boxes differ a lot: DSL, cable, fibre, LTE/5G, a mobile stick as backup, mesh setups, smart home devices of every kind. We are looking for beta testers who try the module on their own box and tell us what works and what does not.
+
+Helpful in a report:
+
+- the model and FRITZ!OS version of the box
+- how the box is connected to the internet (DSL, cable, fibre, mobile, ...)
+- whether Companion reaches it in the home network or over MyFRITZ! / dynamic DNS
+- the Companion log of the connection, or the output of `yarn live-check` (see below), which only reads and never prints the password
+
+Please open an issue at https://github.com/robertskiba/companion-module-fritz-fritzbox/issues.
+
 ## Interfaces used
 
 - **TR-064** (SOAP with HTTP digest authentication) for the router status

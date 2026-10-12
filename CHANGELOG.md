@@ -2,4 +2,5 @@
 
 ## 0.1.0
 
-- First version: router status over TR-064 and smart home control over the FRITZ!OS Smart Home REST API.
+- First version (beta): router status over TR-064 and smart home control over the FRITZ!OS Smart Home REST API.
+- Tested with a real FRITZ!Box, in the home network and over MyFRITZ!. Beta testers with other boxes and connection types are welcome.

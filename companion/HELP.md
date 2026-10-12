@@ -2,6 +2,8 @@
 
 Shows the status of a FRITZ!Box router on buttons and controls the smart home devices connected to it: sockets, lamps, thermostats, blinds, contacts and buttons.
 
+> **Beta:** this module has been tested with a real FRITZ!Box. Since boxes differ a lot (DSL, cable, fibre, LTE/5G, smart home devices), we are looking for beta testers. Please report what works and what does not at https://github.com/robertskiba/companion-module-fritz-fritzbox/issues, with the model, FRITZ!OS version, connection type and the log of the connection.
+
 ### Preparing the FRITZ!Box
 
 1. **Create a user for Companion** under _System > FRITZ!Box Users_ and give it the rights **FRITZ!Box Settings** and **Smart Home**. Without "FRITZ!Box Settings" most router values stay empty, and without "Smart Home" the devices cannot be read or switched.
