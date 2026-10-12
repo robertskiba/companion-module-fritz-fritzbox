@@ -14,12 +14,12 @@ The smart home part needs **FRITZ!OS 8.20 or later**. On older firmware the rout
 
 ### Configuration
 
-| Field                  | Meaning                                                                                                      |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Address                | Where the box is, e.g. `192.168.178.1` or `https://xxxxxxxxxxxxxxxx.myfritz.net:43167`                       |
-| User name / Password   | The user created above                                                                                       |
-| Router status interval | How often connection state and throughput are read. Addresses, WLAN and network devices are read every 30 s. |
-| Smart home interval    | How often all smart home devices are read in one request. 0 switches smart home off.                         |
+| Field                  | Meaning                                                                                                                                                             |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Address                | Where the box is, e.g. `192.168.178.1` or `https://xxxxxxxxxxxxxxxx.myfritz.net:43167`                                                                              |
+| User name / Password   | The user created above                                                                                                                                              |
+| Router status interval | How often connection state and throughput are read, 15 s by default. Addresses, WLAN and network devices are read every 30 s.                                       |
+| Smart home interval    | How often all smart home devices are read in one request, 60 s by default. After a smart home action the state is read again right away. 0 switches smart home off. |
 
 The address decides everything else: `https://` switches on encryption, a number after the colon is the port, and without one the standard port is used (80, or 443 with `https://`). How TR-064 is reached is found out automatically when connecting.
 
@@ -55,15 +55,16 @@ Groups that only some boxes have (WAN 2, DSL, fibre, cable, mobile) only appear 
 
 #### Device
 
-| Variable                | Meaning                      | Example                          |
-| ----------------------- | ---------------------------- | -------------------------------- |
-| `device_connected`      | Companion can read the box   | `true`                           |
-| `device_web_url`        | Address of the web interface | `https://xxxx.myfritz.net:43167` |
-| `device_model`          | Model                        | `FRITZ!Box 7590 AX`              |
-| `device_firmware`       | FRITZ!OS version             | `256.08.20`                      |
-| `device_serial`         | Serial number                | `3810D5000001`                   |
-| `device_uptime`         | Time since the box started   | `3d 04:15:22`                    |
-| `device_uptime_seconds` | The same in seconds          | `274522`                         |
+| Variable                 | Meaning                                                       | Example                                                   |
+| ------------------------ | ------------------------------------------------------------- | --------------------------------------------------------- |
+| `device_connected`       | Companion can read the box                                    | `true`                                                    |
+| `device_web_url`         | Address of the web interface                                  | `https://xxxx.myfritz.net:43167`                          |
+| `device_diagnostics_url` | Download address of the diagnostics report, set by its action | `http://192.168.1.10:8000/instance/FRITZ_Box/diagnostics` |
+| `device_model`           | Model                                                         | `FRITZ!Box 7590 AX`                                       |
+| `device_firmware`        | FRITZ!OS version                                              | `256.08.20`                                               |
+| `device_serial`          | Serial number                                                 | `3810D5000001`                                            |
+| `device_uptime`          | Time since the box started                                    | `3d 04:15:22`                                             |
+| `device_uptime_seconds`  | The same in seconds                                           | `274522`                                                  |
 
 #### WAN 1 (main internet connection)
 
@@ -145,14 +146,19 @@ Groups that only some boxes have (WAN 2, DSL, fibre, cable, mobile) only appear 
 
 Each network gets its own prefix by band, so the names are the same on every model: `wlan_24ghz_`, `wlan_5ghz_`, `wlan_6ghz_` and `wlan_guest_`. A second network on the same band gets a number, e.g. `wlan_5ghz_2_`.
 
-| Variable             | Meaning                          | Example    |
-| -------------------- | -------------------------------- | ---------- |
-| `wlan_clients_total` | Clients on all networks together | `10`       |
-| `wlan_5ghz_ssid`     | Network name                     | `Studio 5` |
-| `wlan_5ghz_enabled`  | Network switched on              | `true`     |
-| `wlan_5ghz_band`     | Frequency band                   | `5 GHz`    |
-| `wlan_5ghz_channel`  | Channel                          | `44`       |
-| `wlan_5ghz_clients`  | Clients on this network          | `7`        |
+| Variable                        | Meaning                                                                         | Example       |
+| ------------------------------- | ------------------------------------------------------------------------------- | ------------- |
+| `wlan_enabled`                  | All WLAN switched on (the WLAN button)                                          | `true`        |
+| `wlan_clients_total`            | Clients on all networks together                                                | `10`          |
+| `wlan_5ghz_ssid`                | Network name                                                                    | `Studio 5`    |
+| `wlan_5ghz_enabled`             | Network switched on                                                             | `true`        |
+| `wlan_5ghz_band`                | Frequency band                                                                  | `5 GHz`       |
+| `wlan_5ghz_channel`             | Channel                                                                         | `44`          |
+| `wlan_5ghz_clients`             | Clients on this network                                                         | `7`           |
+| `wlan_5ghz_password`            | WLAN password, readable on purpose, e.g. to show the guest password on a button | `welcome2026` |
+| `wlan_guest_auto_off`           | Guest WLAN only: switches itself off after a while                              | `true`        |
+| `wlan_guest_auto_off_minutes`   | Guest WLAN only: after how many minutes                                         | `30`          |
+| `wlan_guest_auto_off_remaining` | Guest WLAN only: minutes left, as the box reports it                            | `12`          |
 
 #### LAN
 
@@ -199,9 +205,18 @@ Example: `$(fritz:smarthome_steckdose_regie_power)` shows the power of the socke
 
 ### Router status
 
-Action: **Internet: reconnect now** drops the internet connection so the box dials in again at once, usually with a new IP address. The internet is gone for a few seconds; over MyFRITZ! the module also loses the box until the new address has reached the DNS, and then reconnects by itself.
+Actions:
 
-Feedbacks: connected, internet connected, line synchronised, WLAN enabled (guest, per band or any), network device online (by MAC, IP or name), and throughput above or below a value.
+- **Internet: reconnect now** drops the internet connection so the box dials in again at once, usually with a new IP address. The internet is gone for a few seconds; over MyFRITZ! the module also loses the box until the new address has reached the DNS, and then reconnects by itself.
+- **WLAN: switch on, off or toggle** for the guest WLAN, a single band, or all WLAN together like the WLAN button. Careful: switching off the WLAN Companion itself uses cuts its connection to the box.
+- **WLAN: change password**, typed in or generated (easy to read, without look-alike characters such as 0/O and 1/l). Connected devices have to connect again with the new password, which then shows up in the password variable of that WLAN.
+- **WLAN: change name (SSID)**.
+- **Network device: wake up (Wake on LAN)** and **Network device: block or allow internet**, both chosen from the list of devices the box knows; the list follows the box. Blocking takes a few seconds to take effect, and the device needs a current IP address.
+- **FRITZ!Box: restart**. Only runs when the confirmation in the action is ticked, since internet, WLAN and the home network can be gone for several minutes.
+
+Over TR-064 the guest WLAN can be switched, renamed and given a new password. Its auto-off timer and its device isolation can only be read, not set.
+
+Feedbacks: connected, internet connected, line synchronised, WLAN enabled (guest, all, per band or any), network device online, network device internet blocked, and throughput above or below a value.
 
 ### Smart home
 
@@ -215,7 +230,7 @@ Presets are created for every device the box reports.
 
 ### Diagnostics report
 
-The action **Write diagnostics report** writes a file named `fritzbox-diagnostics-<date>.json` into the home folder of the computer running Companion; the log shows the exact path. It holds what the box offers and answers over TR-064, the smart home overview as the box sends it, the recent requests and problems, and the router values. Passwords and session ids are never included. IP and MAC addresses, network and device names, serial numbers, the user name and the address of the box are replaced by placeholders such as `IPv4#1`, so the report can be shared as it is.
+The report is served by the web server of Companion, at `/instance/<name of the connection>/diagnostics`. To get it, add the action **Diagnostics report: show the download address** to a button and press it once. The Companion log, and the variable `device_diagnostics_url`, then show the address, e.g. `http://192.168.1.10:8000/instance/FRITZ_Box/diagnostics`. Open it in a browser and the report is downloaded as a file. It holds what the box offers and answers over TR-064, the smart home overview as the box sends it, the recent requests and problems, and the router values. Passwords and session ids are never included. IP and MAC addresses, network and device names, WLAN passwords, serial numbers, the user name and the address of the box are replaced by placeholders such as `IPv4#1`, so the report can be shared as it is. Nothing is written to the disk of the computer running Companion.
 
 ### Good to know
 

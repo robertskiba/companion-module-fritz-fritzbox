@@ -19,8 +19,8 @@ export type ModuleSecrets = {
 export const DEFAULT_CONFIG: ModuleConfig = {
 	host: '192.168.178.1',
 	username: '',
-	pollInterval: 5,
-	smartHomeInterval: 5,
+	pollInterval: 15,
+	smartHomeInterval: 60,
 }
 
 /** Where the web interface of the box is, worked out from the address field. */
@@ -170,8 +170,9 @@ export function GetConfigFields(): SomeCompanionConfigField[] {
 			id: 'smartHomeInterval',
 			label: 'Smart home interval (s), 0 = off',
 			tooltip:
-				'How often the state of all smart home devices is read, in one request. Battery powered ' +
-				'thermostats only report every few minutes, so faster polling does not make them faster.',
+				'How often the state of all smart home devices is read, in one request. After a smart home ' +
+				'action the state is read again right away, so a long interval does not delay feedbacks. ' +
+				'Battery powered thermostats only report every few minutes anyway.',
 			width: 6,
 			min: 0,
 			max: 300,

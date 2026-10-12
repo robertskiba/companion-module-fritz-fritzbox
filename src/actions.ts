@@ -1,6 +1,7 @@
 import type { DropdownChoice } from '@companion-module/base'
 import type ModuleInstance from './main.js'
-import { unitOption } from './feedbacks.js'
+import { hostChoices, unitOption, wlanChoices } from './feedbacks.js'
+import { findHost, randomWlanPassword, wlanPasswordProblem, wlanSsidProblem, type WlanInfo } from './router.js'
 import { findUnit, isOn, setPointOf, templateChoices, triggerChoices } from './shstate.js'
 import type { ShUnit, ShUnitUpdate } from './smarthome.js'
 
@@ -23,6 +24,12 @@ export type ActionsSchema = {
 	sh_apply_template: { options: { template: string } }
 	sh_trigger: { options: { trigger: string; mode: SwitchMode } }
 	wan_reconnect: { options: NoOptions }
+	wlan_switch: { options: { wlan: string; mode: SwitchMode } }
+	wlan_password: { options: { wlan: string; mode: 'set' | 'random'; password: string; length: number } }
+	wlan_ssid: { options: { wlan: string; ssid: string } }
+	host_wake: { options: { host: string } }
+	host_internet: { options: { host: string; mode: 'block' | 'allow' | 'toggle' } }
+	box_reboot: { options: { confirm: boolean } }
 	diagnostics_report: { options: NoOptions }
 	refresh: { options: NoOptions }
 }
@@ -80,8 +87,46 @@ export function endTimeIn(minutes: number, now = Date.now()): number {
 	return Math.floor(now / 1000) + clamped * 60
 }
 
+/**
+ * The download address of the diagnostics report, from the binding of the Companion web server.
+ * When Companion listens on all interfaces, the first real address of the machine is used.
+ */
+export function diagnosticsUrl(bindIp: string, allIp: string, bindPort: string, path: string): string {
+	const usable = (ip: string): boolean =>
+		ip !== '' && !ip.includes('$(') && ip !== '0.0.0.0' && ip !== '::' && !ip.startsWith('127.') && ip !== '::1'
+	let ip = bindIp.trim()
+	if (!usable(ip)) {
+		// all_ip is a list, separated by real or written-out line breaks.
+		ip =
+			allIp
+				.split(/\\n|[\s,;]+/)
+				.map((entry) => entry.trim())
+				.find(usable) ?? '127.0.0.1'
+	}
+	const port = /^\d+$/.test(bindPort.trim()) ? bindPort.trim() : '8000'
+	const host = ip.includes(':') ? `[${ip}]` : ip
+	return `http://${host}:${port}${path}`
+}
+
+/** The WLAN an action names: the guest network by role, the others by their service id. */
+export function findWlan(wlans: WlanInfo[], which: string): WlanInfo | undefined {
+	if (which === 'guest') return wlans.find((wlan) => wlan.guest)
+	return wlans.find((wlan) => wlan.serviceId === which)
+}
+
 export function UpdateActions(self: ModuleInstance): void {
 	const sh = self.smartHome
+	const router = self.router
+	const devices = hostChoices(router)
+	/** The device field: only devices the box knows, refreshed whenever its list changes. */
+	const deviceField = {
+		id: 'host' as const,
+		type: 'dropdown' as const,
+		label: 'Device',
+		choices: devices,
+		default: String(devices[0]?.id ?? ''),
+		tooltip: 'The list follows the network devices the box knows. It refreshes when devices come or go.',
+	}
 
 	/** Looks up the unit an action names and logs why when it cannot be used. */
 	const target = (actionName: string, uid: string): ShUnit | undefined => {
@@ -422,14 +467,265 @@ export function UpdateActions(self: ModuleInstance): void {
 		},
 
 		diagnostics_report: {
-			name: 'Write diagnostics report',
+			name: 'Diagnostics report: show the download address',
 			description:
-				'For beta testers: writes a file with what this box offers and answers into the home folder of ' +
-				'the computer running Companion. The log shows where. Passwords are never included; addresses, ' +
-				'names and serial numbers are replaced by placeholders.',
-			options: [],
-			callback: async () => {
-				await self.writeDiagnostics()
+				'For beta testers: writes into the log, and into the variable device_diagnostics_url, where the ' +
+				'diagnostics report of this connection can be downloaded with a browser. Passwords are never ' +
+				'included; addresses, names and serial numbers are replaced by placeholders.',
+			// The address of the Companion web server is only known to Companion. These hidden fields hand
+			// its internal variables to the action, so the link uses the actual binding.
+			options: [
+				{
+					id: 'bindIp',
+					type: 'textinput',
+					label: 'Companion IP',
+					default: '$(internal:bind_ip)',
+					useVariables: true,
+					isVisibleExpression: 'false',
+				},
+				{
+					id: 'allIp',
+					type: 'textinput',
+					label: 'Companion IPs',
+					default: '$(internal:all_ip)',
+					useVariables: true,
+					isVisibleExpression: 'false',
+				},
+				{
+					id: 'bindPort',
+					type: 'textinput',
+					label: 'Companion port',
+					default: '$(internal:bind_port)',
+					useVariables: true,
+					isVisibleExpression: 'false',
+				},
+			],
+			callback: async (action) => {
+				const url = diagnosticsUrl(
+					String(action.options.bindIp ?? ''),
+					String(action.options.allIp ?? ''),
+					String(action.options.bindPort ?? ''),
+					self.diagnosticsPath(),
+				)
+				self.setVariableValues({ device_diagnostics_url: url })
+				self.log('info', `Diagnostics report: open ${url} in a browser`)
+				return Promise.resolve()
+			},
+		},
+
+		wlan_switch: {
+			name: 'WLAN: switch on, off or toggle',
+			description:
+				'The guest WLAN, a single band, or all WLAN together like the WLAN button. Careful: switching off ' +
+				'the WLAN Companion itself is connected through cuts its connection to the box.',
+			options: [
+				{
+					id: 'wlan',
+					type: 'dropdown',
+					label: 'WLAN',
+					choices: wlanChoices(router).filter((choice) => choice.id !== 'any'),
+					default: 'guest',
+					allowCustom: true,
+				},
+				{
+					id: 'mode',
+					type: 'dropdown',
+					label: 'Action',
+					choices: SWITCH_MODES,
+					default: 'toggle',
+					disableAutoExpression: true,
+				},
+			],
+			callback: async (action) => {
+				const which = action.options.wlan
+				if (which === 'all') {
+					const current = self.router.wlanGlobalEnabled ?? self.router.wlans.some((wlan) => wlan.enabled)
+					const on = resolveSwitch(action.options.mode, self.router.wlans.length ? current : undefined)
+					if (on === undefined) {
+						self.log('warn', 'WLAN: cannot toggle, the WLAN state is not known yet')
+						return
+					}
+					await self.runRouter(`All WLAN ${on ? 'on' : 'off'}`, async (reader) => reader.setWlanGlobal(on))
+					return
+				}
+				const wlan = findWlan(self.router.wlans, which)
+				if (!wlan) {
+					self.log('warn', `WLAN: "${which}" is not known on this box`)
+					return
+				}
+				const on = resolveSwitch(action.options.mode, wlan.enabled)
+				const title = wlan.guest ? 'Guest WLAN' : `WLAN ${wlan.band || wlan.index}`
+				await self.runRouter(`${title} ${on ? 'on' : 'off'}`, async (reader) =>
+					reader.setWlanEnabled(wlan.serviceId, on === true),
+				)
+			},
+		},
+
+		wlan_password: {
+			name: 'WLAN: change password',
+			description:
+				'Sets a new WLAN password, typed in or generated. Devices already connected have to connect ' +
+				'again with the new password. The current password is in the variable of that WLAN, e.g. wlan_guest_password.',
+			options: [
+				{
+					id: 'wlan',
+					type: 'dropdown',
+					label: 'WLAN',
+					choices: wlanChoices(router, false),
+					default: 'guest',
+					allowCustom: true,
+				},
+				{
+					id: 'mode',
+					type: 'dropdown',
+					label: 'Password',
+					choices: [
+						{ id: 'random', label: 'Generate a new random one' },
+						{ id: 'set', label: 'Use the one below' },
+					],
+					default: 'random',
+					disableAutoExpression: true,
+				},
+				{
+					id: 'password',
+					type: 'textinput',
+					label: 'New password (8 to 63 characters)',
+					default: '',
+					isVisibleExpression: `$(options:mode) == 'set'`,
+				},
+				{
+					id: 'length',
+					type: 'number',
+					label: 'Length',
+					default: 12,
+					min: 8,
+					max: 63,
+					isVisibleExpression: `$(options:mode) == 'random'`,
+				},
+			],
+			callback: async (action) => {
+				const wlan = findWlan(self.router.wlans, action.options.wlan)
+				if (!wlan) {
+					self.log('warn', `WLAN password: "${action.options.wlan}" is not known on this box`)
+					return
+				}
+				const password =
+					action.options.mode === 'random'
+						? randomWlanPassword(Number(action.options.length) || 12)
+						: String(action.options.password ?? '')
+				const problem = wlanPasswordProblem(password)
+				if (problem) {
+					self.log('warn', `WLAN password: not changed, ${problem}`)
+					return
+				}
+				const title = wlan.guest ? 'guest WLAN' : `WLAN ${wlan.band || wlan.index}`
+				await self.runRouter(`New password for the ${title}`, async (reader) =>
+					reader.setWlanPassword(wlan.serviceId, password),
+				)
+			},
+		},
+
+		wlan_ssid: {
+			name: 'WLAN: change name (SSID)',
+			options: [
+				{
+					id: 'wlan',
+					type: 'dropdown',
+					label: 'WLAN',
+					choices: wlanChoices(router, false),
+					default: 'guest',
+					allowCustom: true,
+				},
+				{ id: 'ssid', type: 'textinput', label: 'New name (up to 32 characters)', default: '' },
+			],
+			callback: async (action) => {
+				const wlan = findWlan(self.router.wlans, action.options.wlan)
+				if (!wlan) {
+					self.log('warn', `WLAN name: "${action.options.wlan}" is not known on this box`)
+					return
+				}
+				const ssid = String(action.options.ssid ?? '').trim()
+				const problem = wlanSsidProblem(ssid)
+				if (problem) {
+					self.log('warn', `WLAN name: not changed, ${problem}`)
+					return
+				}
+				await self.runRouter(`WLAN name "${ssid}"`, async (reader) => reader.setWlanSsid(wlan.serviceId, ssid))
+			},
+		},
+
+		host_wake: {
+			name: 'Network device: wake up (Wake on LAN)',
+			description: 'The box sends the wake-up packet, so the device must support Wake on LAN and have it enabled.',
+			options: [deviceField],
+			callback: async (action) => {
+				const host = findHost(self.router.hosts, action.options.host)
+				if (!host?.mac) {
+					self.log('warn', `Wake on LAN: device "${action.options.host}" is not known on this box`)
+					return
+				}
+				await self.runRouter(`Wake on LAN for ${host.name || host.mac}`, async (reader) => reader.wakeHost(host.mac))
+			},
+		},
+
+		host_internet: {
+			name: 'Network device: block or allow internet',
+			description:
+				'Blocks or allows the internet access of a device, e.g. so show computers do not download updates ' +
+				'during an event. The box applies it within a few seconds. The device needs a current IP address.',
+			options: [
+				deviceField,
+				{
+					id: 'mode',
+					type: 'dropdown',
+					label: 'Action',
+					choices: [
+						{ id: 'block', label: 'Block internet' },
+						{ id: 'allow', label: 'Allow internet' },
+						{ id: 'toggle', label: 'Toggle' },
+					],
+					default: 'block',
+					disableAutoExpression: true,
+				},
+			],
+			callback: async (action) => {
+				const host = findHost(self.router.hosts, action.options.host)
+				if (!host) {
+					self.log('warn', `Internet access: device "${action.options.host}" is not known on this box`)
+					return
+				}
+				if (!host.ip) {
+					self.log('warn', `Internet access: ${host.name || host.mac} has no IP address at the moment`)
+					return
+				}
+				const block = action.options.mode === 'toggle' ? !host.blocked : action.options.mode === 'block'
+				await self.runRouter(`Internet ${block ? 'blocked' : 'allowed'} for ${host.name || host.mac}`, async (reader) =>
+					reader.setInternetBlocked(host.ip, block),
+				)
+			},
+		},
+
+		box_reboot: {
+			name: 'FRITZ!Box: restart',
+			description:
+				'Restarts the box. Internet, WLAN, telephony and the home network can be gone for several minutes. ' +
+				'Only runs when the confirmation below is ticked.',
+			options: [
+				{
+					id: 'confirm',
+					type: 'checkbox',
+					label:
+						'I understand that the internet access and the network can be gone for several minutes, and I accept the risk',
+					default: false,
+					disableAutoExpression: true,
+				},
+			],
+			callback: async (action) => {
+				if (action.options.confirm !== true) {
+					self.log('warn', 'Restart: not done, the confirmation in the action is not ticked')
+					return
+				}
+				await self.runRouter('Restart of the FRITZ!Box', async (reader) => reader.reboot())
 			},
 		},
 

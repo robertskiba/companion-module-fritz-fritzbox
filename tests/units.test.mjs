@@ -14,7 +14,11 @@ const { routerVariableValues, formatUptime } = await import(`${D}/variables.js`)
 const { describeErrors } = await import(`${D}/smarthome.js`)
 const { parseAddress, isHomeNetworkHost, webUrlFor } = await import(`${D}/config.js`)
 const { tr064Routes } = await import(`${D}/main.js`)
-const { listFilePath, connectedProvider } = await import(`${D}/router.js`)
+const { listFilePath, connectedProvider, randomWlanPassword, wlanPasswordProblem, wlanSsidProblem } = await import(
+	`${D}/router.js`
+)
+const { hasMobileHardware, mobileConnected } = await import(`${D}/router.js`)
+const { diagnosticsUrl } = await import(`${D}/actions.js`)
 const { Anonymizer, scrubPath, reportFileName, ExchangeLog } = await import(`${D}/diagnostics.js`)
 const { wlanKeys, hasWan2, accessTypeLabel } = await import(`${D}/variables.js`)
 const { initialOverview } = await import('./fakebox.mjs')
@@ -362,6 +366,64 @@ eq(
 	'the request log drops the oldest',
 	exchanges.entries().map((e) => e.ms),
 	[2, 3, 4],
+)
+
+// --- WLAN passwords and names ---
+eq(
+	'random password length is kept in range',
+	[randomWlanPassword(4).length, randomWlanPassword(12).length, randomWlanPassword(99).length],
+	[8, 12, 63],
+)
+check('random passwords avoid look-alike characters', !/[0O1lI]/.test(randomWlanPassword(63)))
+eq(
+	'password rules',
+	[wlanPasswordProblem('1234567'), wlanPasswordProblem('12345678'), wlanPasswordProblem('Passwört-123')],
+	['at least 8 characters are needed', undefined, 'only printable ASCII characters are allowed, no umlauts'],
+)
+eq(
+	'SSID rules',
+	[wlanSsidProblem(''), wlanSsidProblem('Event Gast'), wlanSsidProblem('x'.repeat(33))],
+	['the name must not be empty', undefined, 'at most 32 bytes are allowed'],
+)
+
+// --- Findings from a real FRITZ!Box 6660 Cable ---
+const noStick = {
+	enabled: true,
+	simStatus: 'factory default',
+	technology: 'unknown',
+	roaming: false,
+	signalRsrp: undefined,
+	provider: '',
+	uptime: 292838,
+}
+eq('a box without a mobile stick has no mobile connection', hasMobileHardware(noStick), false)
+eq('a SIM that is ready counts', hasMobileHardware({ ...noStick, simStatus: 'PIN successful' }), true)
+eq('a technology in use counts', hasMobileHardware({ ...noStick, technology: 'LTE' }), true)
+eq(
+	'connected needs a technology, not just uptime',
+	[mobileConnected(noStick), mobileConnected({ ...noStick, technology: 'LTE' })],
+	[false, true],
+)
+
+eq(
+	'diagnostics link from the binding',
+	diagnosticsUrl('192.168.20.100', '', '8000', '/instance/FRITZ_Box/diagnostics'),
+	'http://192.168.20.100:8000/instance/FRITZ_Box/diagnostics',
+)
+eq(
+	'bound to all interfaces: first real address',
+	diagnosticsUrl('0.0.0.0', '127.0.0.1\\n192.168.20.100\\n172.30.64.1', '8888', '/x'),
+	'http://192.168.20.100:8888/x',
+)
+eq(
+	'real line breaks work as well',
+	diagnosticsUrl('0.0.0.0', '127.0.0.1\n10.0.0.5', '8000', '/x'),
+	'http://10.0.0.5:8000/x',
+)
+eq(
+	'unresolved variables fall back',
+	diagnosticsUrl('$(internal:bind_ip)', '', '$(internal:bind_port)', '/x'),
+	'http://127.0.0.1:8000/x',
 )
 
 console.log(failures === 0 ? '\nAll checks passed' : `\n${failures} check(s) failed`)

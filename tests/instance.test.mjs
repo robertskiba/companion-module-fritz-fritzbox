@@ -1,9 +1,6 @@
 // End-to-end checks: the real module instance against a fake FRITZ!Box, through Companion's
 // instance contract. This is the level at which "it connects" can actually be verified.
 import { startFakeBox, USER, PASSWORD } from './fakebox.mjs'
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 const D = '../dist'
 const ModuleInstance = (await import(`${D}/main.js`)).default
 
@@ -268,6 +265,68 @@ console.log('Router status and smart home against a working box')
 		record.logs.some((l) => l.level === 'warn' && l.message.includes('does-not-exist')),
 	)
 
+	// WLAN: passwords readable, switching, new passwords and names.
+	check(
+		'WLAN passwords are variables',
+		record.variables.wlan_guest_password === 'welcome2026' && record.variables.wlan_5ghz_password === 'studio-secret-5',
+	)
+	check('WLAN button state', record.variables.wlan_enabled === 'true')
+	check(
+		'guest auto off',
+		record.variables.wlan_guest_auto_off === 'true' && record.variables.wlan_guest_auto_off_remaining === '90',
+	)
+	await runAction(record, 'wlan_switch', { wlan: 'guest', mode: 'toggle' })
+	check('guest WLAN switched on', box.state.wlans['/upnp/control/wlanconfig3'].enable === 1)
+	await waitFor(() => record.variables.wlan_guest_enabled === 'true', 'guest WLAN state read back', 4000)
+	check('guest WLAN feedback follows', feedback(record, 'wlan_enabled', { wlan: 'guest' }) === true)
+	await runAction(record, 'wlan_switch', { wlan: 'all', mode: 'off' })
+	check('all WLAN off like the button', box.state.wlanGlobal === 0)
+	await runAction(record, 'wlan_password', { wlan: 'guest', mode: 'set', password: 'Neues-Passwort-1', length: 12 })
+	check('guest password set', box.state.wlans['/upnp/control/wlanconfig3'].key === 'Neues-Passwort-1')
+	await runAction(record, 'wlan_password', { wlan: 'guest', mode: 'random', password: '', length: 14 })
+	const generated = box.state.wlans['/upnp/control/wlanconfig3'].key
+	check('random guest password', /^[a-km-zA-HJ-NP-Z2-9]{14}$/.test(generated), generated)
+	await waitFor(() => record.variables.wlan_guest_password === generated, 'new password read back', 4000)
+	check('the new password shows up in the variable', record.variables.wlan_guest_password === generated)
+	const keyBefore = box.state.wlans['/upnp/control/wlanconfig3'].key
+	await runAction(record, 'wlan_password', { wlan: 'guest', mode: 'set', password: 'kurz', length: 12 })
+	check(
+		'a too short password is refused before it reaches the box',
+		box.state.wlans['/upnp/control/wlanconfig3'].key === keyBefore &&
+			record.logs.some((l) => l.level === 'warn' && /at least 8/.test(l.message)),
+	)
+	await runAction(record, 'wlan_ssid', { wlan: 'guest', ssid: 'Event Gast' })
+	check('guest WLAN renamed', box.state.wlans['/upnp/control/wlanconfig3'].ssid === 'Event Gast')
+
+	// Devices: Wake on LAN and internet block, chosen from the device list.
+	const deviceChoices = record.actions.host_wake.options[0].choices.map((c) => c.id)
+	check(
+		'device list comes from the box',
+		deviceChoices.includes('AA:BB:CC:00:00:01') && deviceChoices.includes('AA:BB:CC:00:00:02'),
+	)
+	check('device field takes no free text', record.actions.host_wake.options[0].allowCustom !== true)
+	await runAction(record, 'host_wake', { host: 'AA:BB:CC:00:00:02' })
+	check('Wake on LAN sent for the tablet', box.state.woken.at(-1) === 'AA:BB:CC:00:00:02')
+	await runAction(record, 'host_internet', { host: 'AA:BB:CC:00:00:01', mode: 'block' })
+	check('internet blocked for the playout PC', box.state.hosts[0].disallow === 1)
+	await waitFor(
+		() => feedback(record, 'host_blocked', { host: 'playout-pc' }) === true,
+		'blocked state read back',
+		4000,
+	)
+	check('blocked feedback follows', feedback(record, 'host_blocked', { host: 'playout-pc' }) === true)
+	await runAction(record, 'host_internet', { host: 'AA:BB:CC:00:00:01', mode: 'toggle' })
+	check('toggle allows it again', box.state.hosts[0].disallow === 0)
+
+	// Restart only with the confirmation ticked.
+	await runAction(record, 'box_reboot', { confirm: false })
+	check(
+		'restart without confirmation is refused',
+		box.state.reboots === 0 && record.logs.some((l) => l.level === 'warn' && /confirmation/.test(l.message)),
+	)
+	await runAction(record, 'box_reboot', { confirm: true })
+	check('restart with confirmation', box.state.reboots === 1)
+
 	await runAction(record, 'wan_reconnect', {})
 	check('reconnect terminates the PPP connection', box.state.reconnects === 1)
 	check(
@@ -278,16 +337,38 @@ console.log('Router status and smart home against a working box')
 	check('the new IP address is read after the reconnect', record.variables.connection_wan1_ipv4 === '198.51.100.23')
 
 	// A diagnostics report, as a beta tester would send it in.
-	const reportDir = await mkdtemp(join(tmpdir(), 'fritz-diag-'))
-	instance.diagnosticsDir = reportDir
-	const reportPath = await instance.writeDiagnostics()
-	const files = await readdir(reportDir)
+	const httpRequest = (path) => ({
+		baseUrl: '/instance/fritz',
+		headers: {},
+		hostname: '127.0.0.1',
+		ip: '127.0.0.1',
+		method: 'GET',
+		originalUrl: `/instance/fritz${path}`,
+		path,
+		query: {},
+	})
+	const response = await instance.handleHttpRequest(httpRequest('/diagnostics'))
 	check(
-		'diagnostics report written',
-		reportPath !== undefined && files.length === 1 && /^fritzbox-diagnostics-.*\.json$/.test(files[0]),
+		'diagnostics report served as a download',
+		response.status === 200 &&
+			/^attachment; filename="fritzbox-diagnostics-.*\.json"$/.test(response.headers['Content-Disposition']),
 	)
-	const reportText = await readFile(join(reportDir, files[0]), 'utf8')
+	const reportText = response.body
 	const report = JSON.parse(reportText)
+	const page = await instance.handleHttpRequest(httpRequest('/'))
+	check('a start page links to the report', page.status === 200 && page.body.includes('href="diagnostics"'))
+	check('other paths are not found', (await instance.handleHttpRequest(httpRequest('/nope'))).status === 404)
+	await runAction(record, 'diagnostics_report', { bindIp: '192.168.20.100', allIp: '', bindPort: '8000' })
+	check(
+		'the action logs the download address from the binding',
+		record.logs.some(
+			(l) => l.level === 'info' && l.message.includes('http://192.168.20.100:8000/instance/fritz/diagnostics'),
+		),
+	)
+	check(
+		'and puts it in a variable',
+		record.variables.device_diagnostics_url === 'http://192.168.20.100:8000/instance/fritz/diagnostics',
+	)
 	check(
 		'report holds the box model and firmware',
 		reportText.includes('FRITZ!Box 7590 AX') && reportText.includes('256.08.20'),
@@ -308,10 +389,6 @@ console.log('Router status and smart home against a working box')
 		report.smartHome.overview.units.length === 3 && report.smartHome.rights.HomeAuto === 2,
 	)
 	check('report holds recent requests', report.recentRequests.length > 5)
-	check(
-		'report path is logged',
-		record.logs.some((l) => l.level === 'info' && l.message.includes(reportPath)),
-	)
 	const leaks = {
 		password: PASSWORD,
 		'user name': USER,
@@ -328,7 +405,6 @@ console.log('Router status and smart home against a working box')
 	}
 	check('report contains no session id', !/[?&]sid=[0-9a-f]/i.test(reportText) && !reportText.includes('AVM-SID'))
 	check('placeholders keep entries apart', reportText.includes('NAME#1') && reportText.includes('NAME#2'))
-	await rm(reportDir, { recursive: true, force: true })
 
 	check('one login served everything', box.state.loginAttempts === 1, `attempts ${box.state.loginAttempts}`)
 

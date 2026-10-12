@@ -25,6 +25,7 @@ export type FeedbacksSchema = {
 	wan_link_up: { type: 'boolean'; options: NoOptions }
 	wlan_enabled: { type: 'boolean'; options: { wlan: string } }
 	host_active: { type: 'boolean'; options: { host: string } }
+	host_blocked: { type: 'boolean'; options: { host: string } }
 	throughput: { type: 'boolean'; options: { direction: Direction; comparison: Comparison; mbit: number } }
 	smarthome_available: { type: 'boolean'; options: NoOptions }
 	sh_on: { type: 'boolean'; options: { unit: string } }
@@ -76,23 +77,25 @@ export function unitOption(sh: SmartHomeState, capability?: Capability): Compani
 }
 
 /** WLAN choices: the guest network by role, the radios by band, since instance numbers vary between models. */
-export function wlanChoices(router: RouterState): DropdownChoice[] {
+export function wlanChoices(router: RouterState, withAll = true): DropdownChoice[] {
 	const choices: DropdownChoice[] = [{ id: 'guest', label: 'Guest WLAN' }]
+	if (withAll) choices.push({ id: 'all', label: 'All WLAN (like the WLAN button)' })
 	for (const wlan of router.wlans) {
 		if (wlan.guest) continue
 		choices.push({ id: wlan.serviceId, label: `WLAN ${wlan.band || wlan.index}${wlan.ssid ? ` (${wlan.ssid})` : ''}` })
 	}
-	choices.push({ id: 'any', label: 'Any WLAN except guest' })
+	if (withAll) choices.push({ id: 'any', label: 'Any WLAN except guest' })
 	return choices
 }
 
 export function wlanEnabled(router: RouterState, which: string): boolean {
 	if (which === 'guest') return router.wlans.some((wlan) => wlan.guest && wlan.enabled)
 	if (which === 'any') return router.wlans.some((wlan) => !wlan.guest && wlan.enabled)
+	if (which === 'all') return router.wlanGlobalEnabled ?? router.wlans.some((wlan) => wlan.enabled)
 	return router.wlans.find((wlan) => wlan.serviceId === which)?.enabled ?? false
 }
 
-function hostChoices(router: RouterState): DropdownChoice[] {
+export function hostChoices(router: RouterState): DropdownChoice[] {
 	if (!router.hosts || router.hosts.length === 0) return [{ id: '', label: 'No network devices known yet' }]
 	return router.hosts
 		.filter((host) => host.mac)
@@ -187,6 +190,25 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 				},
 			],
 			callback: (feedback) => findHost(self.router.hosts, feedback.options.host)?.active ?? false,
+		},
+
+		host_blocked: {
+			name: 'Network device: internet blocked',
+			description: 'Active while the internet access of this device is blocked on the box',
+			type: 'boolean',
+			defaultStyle: { bgcolor: RED, color: WHITE },
+			options: [
+				{
+					id: 'host',
+					type: 'dropdown',
+					label: 'Device',
+					choices: hostChoices(router),
+					default: String(hostChoices(router)[0]?.id ?? ''),
+					allowCustom: true,
+					tooltip: 'Pick a device, or type a MAC address, IP address or the name shown on the box',
+				},
+			],
+			callback: (feedback) => findHost(self.router.hosts, feedback.options.host)?.blocked ?? false,
 		},
 
 		throughput: {

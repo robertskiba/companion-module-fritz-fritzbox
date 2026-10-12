@@ -1,6 +1,3 @@
-import { mkdir, writeFile } from 'node:fs/promises'
-import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { isIP } from 'node:net'
 import type { Tr064Client } from './tr064.js'
 
@@ -170,25 +167,4 @@ export function reportFileName(now = new Date()): string {
 		`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
 		`_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`
 	return `fritzbox-diagnostics-${stamp}.json`
-}
-
-/**
- * Writes the report into the home folder of the user Companion runs as, where a tester finds it
- * easily, or into the temporary folder if the home folder cannot be written. Returns the path.
- */
-export async function writeReport(report: unknown, directory?: string): Promise<string> {
-	const text = `${JSON.stringify(report, null, 2)}\n`
-	const candidates = directory ? [directory] : [homedir(), tmpdir()]
-	let lastError: unknown
-	for (const candidate of candidates) {
-		try {
-			await mkdir(candidate, { recursive: true })
-			const path = join(candidate, reportFileName())
-			await writeFile(path, text, 'utf8')
-			return path
-		} catch (error) {
-			lastError = error
-		}
-	}
-	throw lastError instanceof Error ? lastError : new Error('The report could not be written')
 }

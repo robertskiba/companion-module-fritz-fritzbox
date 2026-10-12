@@ -77,10 +77,24 @@ export function UpdatePresets(self: ModuleInstance): void {
 		},
 		status_guest_wlan: {
 			type: 'simple',
-			name: 'Guest WLAN',
+			name: 'Guest WLAN on/off',
 			keywords: ['wlan', 'wifi', 'guest'],
 			style: {
 				text: `Guest WLAN\n${v('wlan_guest_ssid')}`,
+				size: 'auto',
+				color: WHITE,
+				bgcolor: GREY,
+				show_topbar: false,
+			},
+			steps: [{ down: [{ actionId: 'wlan_switch', options: { wlan: 'guest', mode: 'toggle' } }], up: [] }],
+			feedbacks: [{ feedbackId: 'wlan_enabled', options: { wlan: 'guest' }, style: { bgcolor: BLUE, color: WHITE } }],
+		},
+		status_guest_password: {
+			type: 'simple',
+			name: 'Guest WLAN name and password',
+			keywords: ['wlan', 'wifi', 'guest', 'password'],
+			style: {
+				text: `${v('wlan_guest_ssid')}\n${v('wlan_guest_password')}`,
 				size: 'auto',
 				color: WHITE,
 				bgcolor: GREY,
@@ -299,6 +313,7 @@ export function UpdatePresets(self: ModuleInstance): void {
 				'status_rate_up',
 				'status_wan_uptime',
 				'status_guest_wlan',
+				'status_guest_password',
 				'status_wlan_clients',
 				'status_hosts',
 				'status_box',

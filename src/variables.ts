@@ -1,6 +1,6 @@
 import type { CompanionVariableDefinitions, CompanionVariableValues } from '@companion-module/base'
 import type ModuleInstance from './main.js'
-import type { RouterState, WlanInfo } from './router.js'
+import { mobileConnected, type RouterState, type WlanInfo } from './router.js'
 import { suffixesFor, unitLabel, unitValues, unitVarPrefix, type SmartHomeState } from './shstate.js'
 
 /**
@@ -22,6 +22,7 @@ import { suffixesFor, unitLabel, unitValues, unitVarPrefix, type SmartHomeState 
 export interface VariablesSchema extends CompanionVariableValues {
 	device_connected: string
 	device_web_url: string
+	device_diagnostics_url: string
 	device_model: string
 	device_firmware: string
 	device_serial: string
@@ -43,6 +44,7 @@ export interface VariablesSchema extends CompanionVariableValues {
 	connection_wan1_rate_up_mbit: number | string
 	connection_wan1_rate_down_kbyte: number | string
 	connection_wan1_rate_up_kbyte: number | string
+	wlan_enabled: string
 	wlan_clients_total: number | string
 	lan_hosts_active: number | string
 	lan_hosts_known: number | string
@@ -54,6 +56,7 @@ type Definitions = CompanionVariableDefinitions<VariablesSchema>
 const STATIC_DEFINITIONS: Definitions = {
 	device_connected: { name: 'Device: connection to the FRITZ!Box established' },
 	device_web_url: { name: 'Device: address of the web interface' },
+	device_diagnostics_url: { name: 'Device: download address of the diagnostics report (set by its action)' },
 	device_model: { name: 'Device: model' },
 	device_firmware: { name: 'Device: FRITZ!OS version' },
 	device_serial: { name: 'Device: serial number' },
@@ -75,6 +78,7 @@ const STATIC_DEFINITIONS: Definitions = {
 	connection_wan1_rate_up_mbit: { name: 'WAN 1: current upload in Mbit/s' },
 	connection_wan1_rate_down_kbyte: { name: 'WAN 1: current download in kB/s' },
 	connection_wan1_rate_up_kbyte: { name: 'WAN 1: current upload in kB/s' },
+	wlan_enabled: { name: 'WLAN: switched on (the WLAN button)' },
 	wlan_clients_total: { name: 'WLAN: clients on all networks' },
 	lan_hosts_active: { name: 'LAN: network devices currently active' },
 	lan_hosts_known: { name: 'LAN: network devices known to the box' },
@@ -132,6 +136,14 @@ const WLAN_SUFFIXES: { suffix: string; name: string }[] = [
 	{ suffix: 'band', name: 'frequency band' },
 	{ suffix: 'channel', name: 'channel' },
 	{ suffix: 'clients', name: 'connected clients' },
+	{ suffix: 'password', name: 'password' },
+]
+
+/** Only the guest network switches itself off after a while. */
+const GUEST_SUFFIXES: { suffix: string; name: string }[] = [
+	{ suffix: 'auto_off', name: 'switches itself off after a while' },
+	{ suffix: 'auto_off_minutes', name: 'switches itself off after this many minutes' },
+	{ suffix: 'auto_off_remaining', name: 'time left until it switches off (minutes, as the box reports it)' },
 ]
 
 /** Readable access types: the X_AVM-DE_ prefix of the TR-064 values means nothing to anyone. */
@@ -188,7 +200,7 @@ export function UpdateVariableDefinitions(self: ModuleInstance): void {
 	for (const wlan of router.wlans) {
 		const key = keys.get(wlan.serviceId)
 		const title = wlan.guest ? 'WLAN guest' : `WLAN ${wlan.band || wlan.index}`
-		for (const { suffix, name } of WLAN_SUFFIXES) {
+		for (const { suffix, name } of [...WLAN_SUFFIXES, ...(wlan.guest ? GUEST_SUFFIXES : [])]) {
 			definitions[`wlan_${key}_${suffix}`] = { name: `${title}: ${name}` }
 		}
 	}
@@ -270,6 +282,7 @@ export function routerVariableValues(router: RouterState, now = Date.now()): Com
 		connection_wan1_rate_up_mbit: bytesToMbit(router.rateUp),
 		connection_wan1_rate_down_kbyte: bytesToKbyte(router.rateDown),
 		connection_wan1_rate_up_kbyte: bytesToKbyte(router.rateUp),
+		wlan_enabled: router.wlanGlobalEnabled === undefined ? '' : String(router.wlanGlobalEnabled),
 		wlan_clients_total: router.wlans.length ? router.wlans.reduce((sum, wlan) => sum + wlan.clients, 0) : '',
 		lan_hosts_active: router.hosts ? router.hosts.filter((host) => host.active).length : '',
 		lan_hosts_known: router.hosts?.length ?? '',
@@ -321,8 +334,8 @@ export function routerVariableValues(router: RouterState, now = Date.now()): Com
 		Object.assign(values, {
 			connection_wan2_type: 'Mobile',
 			connection_wan2_enabled: String(mobile.enabled),
-			// The mobile service has no connection state of its own; a running uptime is the sign.
-			connection_wan2_connected: String(mobile.enabled && (mobile.uptime ?? 0) > 0),
+			// The mobile service has no connection state of its own; a network technology in use is the sign.
+			connection_wan2_connected: String(mobileConnected(mobile)),
 			connection_wan2_uptime: formatted(mobile.uptime),
 			connection_wan2_uptime_seconds: blank(mobile.uptime),
 		})
@@ -336,6 +349,12 @@ export function routerVariableValues(router: RouterState, now = Date.now()): Com
 		values[`${prefix}_band`] = wlan.band
 		values[`${prefix}_channel`] = wlan.channel
 		values[`${prefix}_clients`] = wlan.clients
+		values[`${prefix}_password`] = wlan.password ?? ''
+		if (wlan.guest) {
+			values[`${prefix}_auto_off`] = wlan.autoOff === undefined ? '' : String(wlan.autoOff)
+			values[`${prefix}_auto_off_remaining`] = wlan.autoOffRemaining ?? ''
+			values[`${prefix}_auto_off_minutes`] = wlan.autoOffMinutes ?? ''
+		}
 	}
 	return values
 }

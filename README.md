@@ -15,7 +15,7 @@ Helpful in a report:
 - the model and FRITZ!OS version of the box
 - how the box is connected to the internet (DSL, cable, fibre, mobile, ...)
 - whether Companion reaches it in the home network or over MyFRITZ! / dynamic DNS
-- a diagnostics report: add the action **Write diagnostics report** to a button and press it once. The module writes a file named `fritzbox-diagnostics-<date>.json` into the home folder of the computer running Companion, and the log shows the exact path. The report never contains passwords or session ids, and addresses, names and serial numbers are replaced by placeholders, so it can be attached to an issue as it is.
+- a diagnostics report: add the action **Diagnostics report: show the download address** to a button and press it once. The Companion log, and the variable `device_diagnostics_url`, then show the address, e.g. `http://192.168.1.10:8000/instance/FRITZ_Box/diagnostics`. Open it in a browser and the report is downloaded as a file. The report never contains passwords or session ids, and addresses, names and serial numbers are replaced by placeholders, so it can be attached to an issue as it is.
 - if that is not possible: the Companion log of the connection, or the output of `yarn live-check` (see below)
 
 Please open an issue at https://github.com/robertskiba/companion-module-fritz-fritzbox/issues.

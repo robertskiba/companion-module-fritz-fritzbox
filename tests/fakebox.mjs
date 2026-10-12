@@ -26,6 +26,8 @@ const SERVICES = [
 	['X_AVM-DE_WANMobileConnection', 'X_AVM-DE_WANMobileConnection1', '/upnp/control/x_wanmobileconn'],
 	['X_AVM-DE_WANFiber', 'X_AVM-DE_WANFiber1', '/upnp/control/x_wanfiber'],
 	['X_AVM-DE_Media', 'X_AVM-DE_Media1', '/upnp/control/x_media'],
+	['X_AVM-DE_HostFilter', 'X_AVM-DE_HostFilter1', '/upnp/control/x_hostfilter'],
+	['DeviceConfig', 'DeviceConfig1', '/upnp/control/deviceconfig'],
 ]
 
 function description() {
@@ -44,21 +46,75 @@ function description() {
 	)
 }
 
-const WLANS = {
-	'/upnp/control/wlanconfig1': { ssid: 'Studio', band: '2400', channel: 6, enable: 1, clients: 3, ap: 'normal' },
-	'/upnp/control/wlanconfig2': { ssid: 'Studio 5', band: '5000', channel: 44, enable: 1, clients: 7, ap: 'normal' },
-	'/upnp/control/wlanconfig3': { ssid: 'Gäste & Co', band: '2400', channel: 6, enable: 0, clients: 0, ap: 'guest' },
-}
+const initialWlans = () => ({
+	'/upnp/control/wlanconfig1': {
+		ssid: 'Studio',
+		band: '2400',
+		channel: 6,
+		enable: 1,
+		clients: 3,
+		ap: 'normal',
+		key: 'studio-secret-24',
+	},
+	'/upnp/control/wlanconfig2': {
+		ssid: 'Studio 5',
+		band: '5000',
+		channel: 44,
+		enable: 1,
+		clients: 7,
+		ap: 'normal',
+		key: 'studio-secret-5',
+	},
+	'/upnp/control/wlanconfig3': {
+		ssid: 'Gäste & Co',
+		band: '2400',
+		channel: 6,
+		enable: 0,
+		clients: 0,
+		ap: 'guest',
+		key: 'welcome2026',
+	},
+})
 
-const HOST_LIST =
-	'<?xml version="1.0" ?><List>' +
-	'<Item><Index>1</Index><IPAddress>192.168.178.20</IPAddress><MACAddress>AA:BB:CC:00:00:01</MACAddress>' +
-	'<Active>1</Active><HostName>playout-pc</HostName><InterfaceType>Ethernet</InterfaceType>' +
-	'<X_AVM-DE_Guest>0</X_AVM-DE_Guest><X_AVM-DE_URLParameter></X_AVM-DE_URLParameters></Item>' +
-	'<Item><Index>2</Index><IPAddress>192.168.178.21</IPAddress><MACAddress>aa:bb:cc:00:00:02</MACAddress>' +
-	'<Active>0</Active><HostName>tablet</HostName><InterfaceType>802.11</InterfaceType>' +
-	'<X_AVM-DE_Guest>0</X_AVM-DE_Guest><X_AVM-DE_FriendlyName>Regie-Tablet</X_AVM-DE_FriendlyName></Item>' +
-	'<!-- devicehosts :2 --></List>'
+const initialHosts = () => [
+	{
+		ip: '192.168.178.20',
+		mac: 'AA:BB:CC:00:00:01',
+		active: 1,
+		name: 'playout-pc',
+		type: 'Ethernet',
+		friendly: '',
+		disallow: 0,
+	},
+	{
+		ip: '192.168.178.21',
+		mac: 'aa:bb:cc:00:00:02',
+		active: 0,
+		name: 'tablet',
+		type: '802.11',
+		friendly: 'Regie-Tablet',
+		disallow: 0,
+	},
+]
+
+function hostList(hosts) {
+	return (
+		'<?xml version="1.0" ?><List>' +
+		hosts
+			.map(
+				(h, i) =>
+					`<Item><Index>${i + 1}</Index><IPAddress>${h.ip}</IPAddress><MACAddress>${h.mac}</MACAddress>` +
+					`<Active>${h.active}</Active><HostName>${h.name}</HostName><InterfaceType>${h.type}</InterfaceType>` +
+					`<X_AVM-DE_Guest>0</X_AVM-DE_Guest><X_AVM-DE_WANAccess>${h.disallow ? 'denied' : 'granted'}</X_AVM-DE_WANAccess>` +
+					`<X_AVM-DE_Disallow>${h.disallow}</X_AVM-DE_Disallow>` +
+					(h.friendly ? `<X_AVM-DE_FriendlyName>${h.friendly}</X_AVM-DE_FriendlyName>` : '') +
+					// The mismatched tag of the AVM example, kept so the parser stays tolerant.
+					'<X_AVM-DE_URLParameter></X_AVM-DE_URLParameters></Item>',
+			)
+			.join('') +
+		`<!-- devicehosts :${hosts.length} --></List>`
+	)
+}
 
 export function initialOverview() {
 	return {
@@ -157,6 +213,11 @@ export async function startFakeBox(options = {}) {
 		nonces: new Set(),
 		soapCalls: [],
 		smartHome: options.smartHome ?? true,
+		wlans: initialWlans(),
+		hosts: initialHosts(),
+		wlanGlobal: 1,
+		woken: [],
+		reboots: 0,
 		/** How many times the description fails before the box "comes up". */
 		descriptionFailures: options.descriptionFailures ?? 0,
 		// The real box hands out a fresh challenge per page view; a fixed one keeps this simple.
@@ -208,7 +269,8 @@ export async function startFakeBox(options = {}) {
 		`<UPnPError xmlns="urn:schemas-upnp-org:control-1-0"><errorCode>${code}</errorCode>` +
 		`<errorDescription>${text}</errorDescription></UPnPError></detail></s:Fault></s:Body></s:Envelope>`
 
-	function soap(path, action) {
+	function soap(path, action, args = {}) {
+		const WLANS = state.wlans
 		if (path === '/upnp/control/deviceinfo' && action === 'GetSecurityPort') return { NewSecurityPort: 49443 }
 		if (path === '/upnp/control/deviceinfo' && action === 'GetInfo')
 			return {
@@ -265,11 +327,49 @@ export async function startFakeBox(options = {}) {
 				NewChannel: wlan.channel,
 				NewStandard: 'ax',
 				'NewX_AVM-DE_FrequencyBand': wlan.band,
+				'NewX_AVM-DE_WLANGlobalEnable': state.wlanGlobal,
 			}
 		if (wlan && action === 'GetTotalAssociations') return { NewTotalAssociations: wlan.clients }
-		if (wlan && action === 'X_AVM-DE_GetWLANExtInfo') return { 'NewX_AVM-DE_APType': wlan.ap }
+		if (wlan && action === 'X_AVM-DE_GetWLANExtInfo')
+			return {
+				'NewX_AVM-DE_APType': wlan.ap,
+				'NewX_AVM-DE_TimeoutActive': wlan.ap === 'guest' ? 1 : 0,
+				'NewX_AVM-DE_TimeRemain': wlan.ap === 'guest' ? 90 : 0,
+			}
+		if (wlan && action === 'GetSecurityKeys') return { NewKeyPassphrase: wlan.key, NewPreSharedKey: '' }
+		if (wlan && action === 'SetEnable') {
+			wlan.enable = Number(args.NewEnable)
+			return {}
+		}
+		if (wlan && action === 'SetSecurityKeys') {
+			wlan.key = args.NewKeyPassphrase
+			return {}
+		}
+		if (wlan && action === 'SetSSID') {
+			wlan.ssid = args.NewSSID
+			return {}
+		}
+		if (wlan && action === 'X_AVM-DE_SetWLANGlobalEnable') {
+			state.wlanGlobal = Number(args['NewX_AVM-DE_WLANGlobalEnable'])
+			for (const w of Object.values(WLANS)) if (w.ap === 'normal') w.enable = state.wlanGlobal
+			return {}
+		}
+		if (path === '/upnp/control/hosts' && action === 'X_AVM-DE_WakeOnLANByMACAddress') {
+			state.woken.push(args.NewMACAddress)
+			return {}
+		}
+		if (path === '/upnp/control/x_hostfilter' && action === 'DisallowWANAccessByIP') {
+			const host = state.hosts.find((h) => h.ip === args.NewIPv4Address)
+			if (!host) return undefined
+			host.disallow = Number(args.NewDisallow)
+			return {}
+		}
+		if (path === '/upnp/control/deviceconfig' && action === 'Reboot') {
+			state.reboots++
+			return {}
+		}
 		if (path === '/upnp/control/x_wanmobileconn' && action === 'GetInfo')
-			return { NewEnable: 1, NewStatus: 'PIN successful', NewPINFailureCount: 0, NewPUKFailureCount: 0 }
+			return { NewEnabled: 1, NewStatus: 'PIN successful', NewPINFailureCount: 0, NewPUKFailureCount: 0 }
 		if (path === '/upnp/control/x_wanmobileconn' && action === 'GetInfoEx')
 			return {
 				NewCurrentAccessTechnology: 'LTE',
@@ -343,13 +443,21 @@ export async function startFakeBox(options = {}) {
 		}
 		// UPnP status information is off on this box, as it is by default on many.
 		if (url.pathname === '/igddesc.xml') return send(404, '<h1>Not Found</h1>', 'text/html')
-		if (url.pathname === '/devicehostlist.lua') return send(200, HOST_LIST)
+		if (url.pathname === '/devicehostlist.lua') return send(200, hostList(state.hosts))
 
 		if (url.pathname.startsWith('/upnp/control/')) {
 			const action = /#(\w[\w-]*)"/.exec(req.headers.soapaction ?? '')?.[1] ?? ''
 			state.soapCalls.push(action)
 			if (action !== 'GetSecurityPort' && !digestOk(req)) return challenge()
-			const result = soap(url.pathname, action)
+			const args = {}
+			for (const m of body.matchAll(/<(New[\w-]+)>([\s\S]*?)<\/\1>/g))
+				args[m[1]] = m[2]
+					.replace(/&lt;/g, '<')
+					.replace(/&gt;/g, '>')
+					.replace(/&quot;/g, '"')
+					.replace(/&apos;/g, "'")
+					.replace(/&amp;/g, '&')
+			const result = soap(url.pathname, action, args)
 			if (!result) return send(500, soapFault(401, 'Invalid Action'))
 			return send(200, soapResult(action, result))
 		}

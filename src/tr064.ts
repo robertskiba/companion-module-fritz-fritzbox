@@ -250,6 +250,11 @@ export class Tr064Client {
 			body,
 		)
 
+		if (res.status === 404) {
+			// Seen over MyFRITZ!: the box lists X_AVM-DE_Media but its control URL answers 404 there.
+			throw new Tr064Fault(`${service.id}#${action}`, 401, 'Not available on this route (HTTP 404)')
+		}
+
 		if (res.status === 503) {
 			throw new Tr064AuthError('The box is refusing TR-064 logins for now after too many failed attempts')
 		}

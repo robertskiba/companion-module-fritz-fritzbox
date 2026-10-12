@@ -1,4 +1,10 @@
-import { InstanceBase, InstanceStatus, type SomeCompanionConfigField } from '@companion-module/base'
+import {
+	InstanceBase,
+	InstanceStatus,
+	type CompanionHTTPRequest,
+	type CompanionHTTPResponse,
+	type SomeCompanionConfigField,
+} from '@companion-module/base'
 import {
 	DEFAULT_CONFIG,
 	GetConfigFields,
@@ -20,7 +26,7 @@ import { UpdateActions, type ActionsSchema } from './actions.js'
 import { UpdateFeedbacks, type FeedbacksSchema } from './feedbacks.js'
 import { UpdatePresets } from './presets.js'
 import { HttpTransportError, setHttpObserver } from './http.js'
-import { Anonymizer, collectTr064, ExchangeLog, writeReport } from './diagnostics.js'
+import { Anonymizer, collectTr064, ExchangeLog, reportFileName } from './diagnostics.js'
 import { readFile } from 'node:fs/promises'
 import { createRouterState, RouterReader, type ReadProblem, type RouterState } from './router.js'
 import { FritzSession, LoginRefusedError, type WebEndpoint } from './session.js'
@@ -45,6 +51,8 @@ const SLOW_POLL_MS = 30_000
 const DEVICE_INFO_MS = 600_000
 /** After a smart home action, when to look again. DECT devices confirm with some delay. */
 const AFTER_ACTION_MS = [1_000, 4_000]
+/** After a router action, when to read the status again. */
+const AFTER_ROUTER_ACTION_MS = [1_500, 5_000]
 /** After a reconnect, when to read the status again: the line drops and comes back within seconds. */
 const AFTER_RECONNECT_MS = [5_000, 15_000, 30_000]
 /** After TR-064 refused the login, how long to wait before trying again, so the box does not lock up. */
@@ -97,8 +105,6 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 	connected = false
 	/** The plain TR-064 port of the box. A field rather than a constant so tests can use a fake box. */
 	tr064PlainPort = TR064_HTTP_PORT
-	/** Where diagnostics reports go; undefined means the home folder. A field so tests can redirect it. */
-	diagnosticsDir: string | undefined
 	/** The last requests, for diagnostics reports. */
 	readonly #exchanges = new ExchangeLog()
 
@@ -112,6 +118,7 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 	#smartHomeTimer: NodeJS.Timeout | undefined
 	#followUps: NodeJS.Timeout[] = []
 	#reconnectChecks: NodeJS.Timeout[] = []
+	#routerChecks: NodeJS.Timeout[] = []
 	#routerInFlight = false
 	#smartHomeInFlight = false
 	#lastSlowPoll = 0
@@ -208,6 +215,41 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 	}
 
 	/**
+	 * Runs a router change on behalf of an action and reads the status back, addresses and lists
+	 * included, so variables and feedbacks follow. Failures become a log entry, with a hint when
+	 * the user lacks the right for it.
+	 */
+	async runRouter(name: string, fn: (reader: RouterReader) => Promise<void>): Promise<boolean> {
+		const reader = this.#reader
+		if (!reader) {
+			this.log('warn', `${name}: not connected to the FRITZ!Box`)
+			return false
+		}
+		try {
+			await fn(reader)
+			this.log('info', `${name}: done`)
+		} catch (error) {
+			const hint =
+				error instanceof Tr064Fault && error.isMissingRight
+					? ' (the user needs the "FRITZ!Box Settings" right)'
+					: error instanceof Tr064Fault && error.isUnknownAction
+						? ' (not offered by this box)'
+						: ''
+			this.log('error', `${name} failed: ${describe(error)}${hint}`)
+			return false
+		}
+		for (const timer of this.#routerChecks) clearTimeout(timer)
+		// The box applies some changes with a short delay, e.g. the internet block.
+		this.#routerChecks = AFTER_ROUTER_ACTION_MS.map((delay) =>
+			setTimeout(() => {
+				this.#lastSlowPoll = 0
+				void this.#pollRouter()
+			}, delay),
+		)
+		return true
+	}
+
+	/**
 	 * Drops the internet connection so the box dials in again. Afterwards the status is read a few
 	 * times, with the addresses included, so the new connection and IP address show up quickly.
 	 */
@@ -235,12 +277,51 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 		)
 	}
 
+	/** The path below the Companion web server where the diagnostics report of this connection is served. */
+	diagnosticsPath(): string {
+		return `/instance/${encodeURIComponent(this.label)}/diagnostics`
+	}
+
 	/**
-	 * Writes a diagnostics report a beta tester can send in: what the box offers and answers,
+	 * Serves the diagnostics report through the web server of Companion, at
+	 * /instance/<connection label>/diagnostics, as a file download. Modules run without write access
+	 * to the disk, so the browser saving it is the way to a file a beta tester can send in.
+	 */
+	async handleHttpRequest(request: CompanionHTTPRequest): Promise<CompanionHTTPResponse> {
+		const path = request.path.replace(/\/+$/, '')
+		if (path === '/diagnostics' || path === '/diagnostics.json') {
+			const report = await this.buildDiagnostics()
+			return {
+				status: 200,
+				headers: {
+					'Content-Type': 'application/json; charset=utf-8',
+					'Content-Disposition': `attachment; filename="${reportFileName()}"`,
+					'Cache-Control': 'no-store',
+				},
+				body: `${JSON.stringify(report, null, 2)}\n`,
+			}
+		}
+		if (path === '') {
+			return {
+				status: 200,
+				headers: { 'Content-Type': 'text/html; charset=utf-8' },
+				body:
+					'<!doctype html><html><head><meta charset="utf-8"><title>FRITZ!Box diagnostics</title></head>' +
+					'<body style="font-family:sans-serif;max-width:40em;margin:2em auto">' +
+					'<h1>FRITZ!Box diagnostics</h1><p>The report shows how this box answers the module. Passwords ' +
+					'are never included; addresses, names and serial numbers are replaced by placeholders.</p>' +
+					'<p><a href="diagnostics">Download the diagnostics report</a></p></body></html>',
+			}
+		}
+		return { status: 404, body: 'Not found' }
+	}
+
+	/**
+	 * Builds a diagnostics report a beta tester can send in: what the box offers and answers,
 	 * the smart home overview as sent, the recent requests and problems. Passwords, session ids and
 	 * digest data never go in; addresses, names and serial numbers are replaced by placeholders.
 	 */
-	async writeDiagnostics(): Promise<string | undefined> {
+	async buildDiagnostics(): Promise<unknown> {
 		const address = this.#address
 		// The user name can turn up in error messages, the address in request targets.
 		const anonymizer = new Anonymizer([
@@ -296,14 +377,7 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 		report.variables = routerVariableValues(this.router)
 		report.recentRequests = this.#exchanges.entries()
 
-		try {
-			const path = await writeReport(anonymizer.value(report), this.diagnosticsDir)
-			this.log('info', `Diagnostics report written to ${path}`)
-			return path
-		} catch (error) {
-			this.log('error', `Diagnostics report could not be written: ${describe(error)}`)
-			return undefined
-		}
+		return anonymizer.value(report)
 	}
 
 	/** Reads everything at once, for the refresh action. */
@@ -450,6 +524,8 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 		this.#followUps = []
 		for (const timer of this.#reconnectChecks) clearTimeout(timer)
 		this.#reconnectChecks = []
+		for (const timer of this.#routerChecks) clearTimeout(timer)
+		this.#routerChecks = []
 	}
 
 	async #pollRouter(): Promise<void> {
@@ -495,7 +571,15 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 				device_connected: 'true',
 				device_web_url: webUrlFor(address),
 			})
-			this.checkFeedbacks('connected', 'internet_connected', 'wan_link_up', 'wlan_enabled', 'host_active', 'throughput')
+			this.checkFeedbacks(
+				'connected',
+				'internet_connected',
+				'wan_link_up',
+				'wlan_enabled',
+				'host_active',
+				'host_blocked',
+				'throughput',
+			)
 		} catch (error) {
 			if (generation === this.#generation) this.#routerFailed({ area: 'router', error })
 		} finally {
@@ -610,7 +694,7 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 		const fingerprint = [
 			routerShapeFingerprint(this.router),
 			(this.router.hosts ?? [])
-				.map((host) => `${host.mac}=${host.name}`)
+				.map((host) => `${host.mac}=${host.name}=${host.ip}`)
 				.sort()
 				.join(','),
 		].join('|')
@@ -678,12 +762,15 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 	}
 }
 
-/** The version from the manifest, which sits next to the code both in development and in a package. */
+/**
+ * The version of the module. The packaged build writes it into the manifest; in development the
+ * manifest says 0.0.0 as Bitfocus asks, and package.json next to it has the real one.
+ */
 async function moduleVersion(): Promise<string> {
-	for (const candidate of ['../companion/manifest.json', './companion/manifest.json']) {
+	for (const candidate of ['./companion/manifest.json', '../companion/manifest.json', '../package.json']) {
 		try {
-			const manifest = JSON.parse(await readFile(new URL(candidate, import.meta.url), 'utf8')) as { version?: string }
-			if (manifest.version) return manifest.version
+			const file = JSON.parse(await readFile(new URL(candidate, import.meta.url), 'utf8')) as { version?: string }
+			if (file.version && file.version !== '0.0.0') return file.version
 		} catch {
 			// Try the next place.
 		}

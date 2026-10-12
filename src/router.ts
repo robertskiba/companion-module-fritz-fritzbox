@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto'
 import { decodeXmlEntities, HttpTransportError } from './http.js'
 import { Tr064Client, Tr064Fault, tr064Bool, tr064Number } from './tr064.js'
 
@@ -16,6 +17,13 @@ export interface WlanInfo {
 	standard: string
 	clients: number
 	guest: boolean
+	/** The WLAN password, readable on purpose: handy at events. Undefined if the user may not read it. */
+	password: string | undefined
+	/** Guest network only: whether it switches itself off after a while, and what the box reports as left. */
+	autoOff: boolean | undefined
+	autoOffRemaining: string | undefined
+	/** Guest network only: after how many minutes it switches itself off when auto-off is active. */
+	autoOffMinutes: string | undefined
 }
 
 /** One network device the box knows about. */
@@ -26,6 +34,10 @@ export interface HostInfo {
 	active: boolean
 	interfaceType: string
 	guest: boolean
+	/** Internet access is blocked for this device ("Disallow" on the box). */
+	blocked: boolean
+	/** What the box says about its internet access: granted, denied, error or empty. */
+	internet: string
 }
 
 export interface DslInfo {
@@ -107,6 +119,8 @@ export interface RouterState {
 	cable: CableInfo | undefined
 	mobile: MobileInfo | undefined
 	wlans: WlanInfo[]
+	/** The state of the WLAN button: all wireless networks together. */
+	wlanGlobalEnabled: boolean | undefined
 	/** Undefined until the list could be read, so "0 hosts" is never claimed by mistake. */
 	hosts: HostInfo[] | undefined
 }
@@ -136,6 +150,7 @@ export function createRouterState(): RouterState {
 		cable: undefined,
 		mobile: undefined,
 		wlans: [],
+		wlanGlobalEnabled: undefined,
 		hosts: undefined,
 	}
 }
@@ -179,6 +194,8 @@ export function parseHostList(xml: string): HostInfo[] {
 			active: field('Active') === '1',
 			interfaceType: field('InterfaceType'),
 			guest: field('X_AVM-DE_Guest') === '1',
+			blocked: field('X_AVM-DE_Disallow') === '1',
+			internet: field('X_AVM-DE_WANAccess'),
 		})
 	}
 	return hosts
@@ -196,6 +213,26 @@ export function listFilePath(location: string): string {
 	return location.startsWith('/') ? location : `/${location}`
 }
 
+/** SIM states that mean there is no stick or SIM card at all. */
+const NO_MOBILE_STATUSES = new Set(['', 'factory default', 'unconfigured', 'no sim card'])
+
+/**
+ * Whether a mobile stick or SIM is actually there. Every current box announces the mobile service,
+ * because a stick can be plugged in; without one it reports e.g. "factory default" and no technology.
+ */
+export function hasMobileHardware(mobile: MobileInfo): boolean {
+	const technology = mobile.technology.toLowerCase()
+	return (
+		!NO_MOBILE_STATUSES.has(mobile.simStatus.trim().toLowerCase()) || (technology !== '' && technology !== 'unknown')
+	)
+}
+
+/** Whether the mobile connection is up: switched on and attached to a network. */
+export function mobileConnected(mobile: MobileInfo): boolean {
+	const technology = mobile.technology.toLowerCase()
+	return mobile.enabled && technology !== '' && technology !== 'unknown'
+}
+
 /** The provider of the cell the mobile connection uses, from the CellList XML of GetInfoEx. */
 export function connectedProvider(cellList: string): string {
 	for (const match of cellList.matchAll(/<Cell>([\s\S]*?)<\/Cell>/g)) {
@@ -204,6 +241,33 @@ export function connectedProvider(cellList: string): string {
 		if (connected && connected !== 'none') return decodeXmlEntities(/<Provider>([^<]*)</.exec(cell)?.[1] ?? '').trim()
 	}
 	return ''
+}
+
+/** Characters of generated WLAN passwords: easy to read aloud and to type, without 0/O, 1/l/I. */
+const PASSWORD_ALPHABET = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+
+/** A random WLAN password of the given length (8 to 63), for a fresh guest password per event. */
+export function randomWlanPassword(length: number, pick: (max: number) => number = randomInt): string {
+	const size = Math.min(63, Math.max(8, Math.round(length)))
+	let password = ''
+	for (let i = 0; i < size; i++) password += PASSWORD_ALPHABET[pick(PASSWORD_ALPHABET.length)]
+	return password
+}
+
+/** Why a WLAN password would be refused, or undefined when it is fine: 8 to 63 printable ASCII characters. */
+export function wlanPasswordProblem(password: string): string | undefined {
+	if (password.length < 8) return 'at least 8 characters are needed'
+	if (password.length > 63) return 'at most 63 characters are allowed'
+	if (!/^[\x20-\x7e]+$/.test(password)) return 'only printable ASCII characters are allowed, no umlauts'
+	return undefined
+}
+
+/** Why a WLAN name would be refused, or undefined when it is fine. */
+export function wlanSsidProblem(ssid: string): string | undefined {
+	if (ssid.length < 1) return 'the name must not be empty'
+	if (Buffer.byteLength(ssid, 'utf8') > 32) return 'at most 32 bytes are allowed'
+	if (!/^[\x20-\x7e]+$/.test(ssid)) return 'only printable ASCII characters are allowed, no umlauts'
+	return undefined
 }
 
 /** Normalises a MAC address to upper case with colons, so any common spelling matches. */
@@ -296,6 +360,58 @@ export class RouterReader {
 		return service
 	}
 
+	/** Switches one WLAN on or off. */
+	async setWlanEnabled(serviceId: string, enable: boolean): Promise<void> {
+		await this.#tr064.call(serviceId, 'SetEnable', { NewEnable: enable ? 1 : 0 })
+	}
+
+	/** Switches all WLANs on or off like the WLAN button; switching on brings back the ones last active. */
+	async setWlanGlobal(enable: boolean): Promise<void> {
+		const first = (await this.#tr064.services()).find((service) => /^WLANConfiguration\d+$/.test(service.id))
+		if (!first) throw new Error('The box offers no WLAN')
+		await this.#tr064.callService(first, 'X_AVM-DE_SetWLANGlobalEnable', {
+			'NewX_AVM-DE_WLANGlobalEnable': enable ? 1 : 0,
+		})
+	}
+
+	/** Sets the WPA password of one WLAN. The other key fields are ignored by the box. */
+	async setWlanPassword(serviceId: string, password: string): Promise<void> {
+		await this.#tr064.call(serviceId, 'SetSecurityKeys', {
+			NewWEPKey0: '',
+			NewWEPKey1: '',
+			NewWEPKey2: '',
+			NewWEPKey3: '',
+			NewPreSharedKey: '',
+			NewKeyPassphrase: password,
+		})
+	}
+
+	async setWlanSsid(serviceId: string, ssid: string): Promise<void> {
+		await this.#tr064.call(serviceId, 'SetSSID', { NewSSID: ssid })
+	}
+
+	/** Sends a Wake on LAN packet from the box to a device of the home network. */
+	async wakeHost(mac: string): Promise<void> {
+		await this.#tr064.call('Hosts1', 'X_AVM-DE_WakeOnLANByMACAddress', { NewMACAddress: mac })
+	}
+
+	/** Blocks or allows the internet access of a device. The box applies it with a short delay. */
+	async setInternetBlocked(ip: string, block: boolean): Promise<void> {
+		await this.#tr064.call('X_AVM-DE_HostFilter1', 'DisallowWANAccessByIP', {
+			NewIPv4Address: ip,
+			NewDisallow: block ? 1 : 0,
+		})
+	}
+
+	/** Restarts the box. It may drop the answer while going down, which counts as done. */
+	async reboot(): Promise<void> {
+		try {
+			await this.#tr064.call('DeviceConfig1', 'Reboot')
+		} catch (error) {
+			if (!(error instanceof HttpTransportError)) throw error
+		}
+	}
+
 	async readSlow(state: RouterState, withDeviceInfo: boolean): Promise<ReadProblem[]> {
 		const problems: ReadProblem[] = []
 
@@ -386,13 +502,14 @@ export class RouterReader {
 		if (await this.#offers('X_AVM-DE_WANMobileConnection1')) {
 			await this.#area('mobile', problems, async () => {
 				const info = await this.#tr064.call('X_AVM-DE_WANMobileConnection1', 'GetInfo')
-				const enabled = tr064Bool(info.NewEnable)
+				// The documentation says NewEnable; a FRITZ!Box 6660 Cable with FRITZ!OS 8.40 sends NewEnabled.
+				const enabled = tr064Bool(info.NewEnable ?? info.NewEnabled)
 				const ex: Record<string, string> = enabled
 					? await this.#tr064
 							.call('X_AVM-DE_WANMobileConnection1', 'GetInfoEx')
 							.catch((): Record<string, string> => ({}))
 					: {}
-				state.mobile = {
+				const mobile: MobileInfo = {
 					enabled,
 					simStatus: info.NewStatus ?? '',
 					technology: ex.NewCurrentAccessTechnology ?? '',
@@ -401,11 +518,12 @@ export class RouterReader {
 					provider: connectedProvider(ex.NewCellList ?? ''),
 					uptime: tr064Number(ex.NewUptime),
 				}
+				state.mobile = hasMobileHardware(mobile) ? mobile : undefined
 			})
 		}
 
 		await this.#area('wlan', problems, async () => {
-			state.wlans = await this.#readWlans()
+			state.wlans = await this.#readWlans(state)
 		})
 
 		await this.#area('hosts', problems, async () => {
@@ -421,7 +539,7 @@ export class RouterReader {
 		return problems
 	}
 
-	async #readWlans(): Promise<WlanInfo[]> {
+	async #readWlans(state: RouterState): Promise<WlanInfo[]> {
 		const services = (await this.#tr064.services()).filter((service) => /^WLANConfiguration\d+$/.test(service.id))
 		const wlans: WlanInfo[] = []
 		for (const service of services) {
@@ -430,15 +548,34 @@ export class RouterReader {
 				.callService(service, 'GetTotalAssociations')
 				.catch((): Record<string, string> => ({}))
 			let guest = false
+			let autoOff: boolean | undefined
+			let autoOffRemaining: string | undefined
+			let autoOffMinutes: string | undefined
 			if (!this.#unsupported.has(`ext:${service.id}`)) {
 				try {
 					const ext = await this.#tr064.callService(service, 'X_AVM-DE_GetWLANExtInfo')
 					guest = ext['NewX_AVM-DE_APType'] === 'guest'
+					if (guest) {
+						autoOff = tr064Bool(ext['NewX_AVM-DE_TimeoutActive'])
+						autoOffRemaining = ext['NewX_AVM-DE_TimeRemain']
+						autoOffMinutes = ext['NewX_AVM-DE_Timeout']
+					}
 				} catch (error) {
 					if (error instanceof Tr064Fault) this.#unsupported.add(`ext:${service.id}`)
 					else throw error
 				}
 			}
+			let password: string | undefined
+			if (!this.#unsupported.has(`keys:${service.id}`)) {
+				try {
+					password = (await this.#tr064.callService(service, 'GetSecurityKeys')).NewKeyPassphrase
+				} catch (error) {
+					if (error instanceof Tr064Fault) this.#unsupported.add(`keys:${service.id}`)
+					else throw error
+				}
+			}
+			const globalEnable = info['NewX_AVM-DE_WLANGlobalEnable']
+			if (globalEnable !== undefined && globalEnable !== '') state.wlanGlobalEnabled = tr064Bool(globalEnable)
 			const channel = tr064Number(info.NewChannel) ?? 0
 			wlans.push({
 				serviceId: service.id,
@@ -451,6 +588,10 @@ export class RouterReader {
 				standard: info.NewStandard ?? '',
 				clients: tr064Number(associations.NewTotalAssociations) ?? 0,
 				guest,
+				password,
+				autoOff,
+				autoOffRemaining,
+				autoOffMinutes,
 			})
 		}
 		return wlans
