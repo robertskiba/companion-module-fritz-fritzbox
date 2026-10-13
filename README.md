@@ -26,6 +26,7 @@ Please open an issue at https://github.com/robertskiba/companion-module-fritz-fr
 - **UPnP IGD** (no login, home network only) for IPv6 details and as a throughput fallback
 - Over the internet (MyFRITZ! or another dynamic DNS name) TR-064 is used below `/tr064` on the HTTPS port of the remote access
 - **Smart Home REST API** (`/api/v0/smarthome`, FRITZ!OS 8.20 or later), authenticated with a session ID from `login_sid.lua`
+- **AHA-HTTP** (`/webservices/homeautoswitch.lua`) as the automatic fallback for smart home on boxes before FRITZ!OS 8.20, with the same session
 
 The specifications are published by FRITZ! at https://fritz.com/pages/schnittstellen.
 

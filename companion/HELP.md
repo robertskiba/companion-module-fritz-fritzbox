@@ -10,7 +10,7 @@ Shows the status of a FRITZ!Box router on buttons and controls the smart home de
 2. **Allow access for applications** under _Home Network > Network > Network Settings_. This switches on TR-064, which the router status is read through.
 3. Optional: in the same place, switch on **Transmit status information over UPnP**. Only the IPv6 address and prefix need it, plus a fallback for the throughput values.
 
-The smart home part needs **FRITZ!OS 8.20 or later**. On older firmware the router status still works, and the log says why smart home does not.
+Smart home works on current and older boxes alike. From FRITZ!OS 8.20 the module uses the Smart Home REST API; on earlier versions it switches to the older AHA-HTTP interface by itself and says so once in the log. Actions, feedbacks, variables and presets are the same either way.
 
 ### Configuration
 
@@ -202,6 +202,8 @@ Every unit also gets its own prefix: always one from its ID, e.g. `smarthome_116
 | `_last_press`  | Time of the last button press             | `14:32:05`                   |
 
 Example: `$(fritz:smarthome_steckdose_regie_power)` shows the power of the socket named "Steckdose Regie" on a connection labelled `fritz`.
+
+Use the name based prefix on buttons where you can. The ID based one can change for some devices if a box moves from the AHA-HTTP interface to the REST API, e.g. after an update to FRITZ!OS 8.20 or later; the name based one stays the same.
 
 ### Router status
 

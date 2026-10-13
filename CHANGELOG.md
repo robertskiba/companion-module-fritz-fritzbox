@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Smart home on boxes before FRITZ!OS 8.20: the module switches to the older AHA-HTTP interface by itself when the box has no Smart Home REST API. Actions, feedbacks, variables and presets work the same.
+- The diagnostics report names the smart home interface in use and, on boxes with the REST API, also shows how the AHA-HTTP interface sees them.
+
 ## 1.0.0-beta.1
 
 - First version (beta): router status over TR-064 and smart home control over the FRITZ!OS Smart Home REST API.

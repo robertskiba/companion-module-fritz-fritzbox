@@ -119,7 +119,8 @@ export function GetConfigFields(): SomeCompanionConfigField[] {
 			width: 12,
 			value:
 				'Reads the router status over TR-064 and controls smart home devices over the FRITZ!OS ' +
-				'Smart Home REST API (FRITZ!OS 8.20 or later). Create a dedicated user on the box under ' +
+				'Smart Home REST API (FRITZ!OS 8.20 or later), or over the older AHA-HTTP interface on earlier ' +
+				'versions, chosen automatically. Create a dedicated user on the box under ' +
 				'System > FRITZ!Box Users with the rights "FRITZ!Box Settings" and "Smart Home", and make ' +
 				'sure Home Network > Network > Network Settings > "Allow access for applications" is on. ' +
 				'For a box elsewhere, also allow that user access from the internet and enter the internet ' +

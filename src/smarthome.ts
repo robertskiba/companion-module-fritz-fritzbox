@@ -195,7 +195,22 @@ export function describeErrors(body: string): { codes: number[]; text: string } 
  * When the box no longer accepts the SID, the request is repeated once with a fresh login. A
  * second refusal is a real permission problem and is reported as such.
  */
-export class SmartHomeClient {
+/**
+ * What the module needs from a smart home interface. The Smart Home REST API (FRITZ!OS 8.20 and
+ * later) and the older AHA-HTTP interface both provide it, mapped onto the same model.
+ */
+export interface SmartHomeBackend {
+	readonly kind: 'rest' | 'aha'
+	overview(): Promise<ShOverview>
+	/** What the box sent, for the diagnostics report. */
+	rawOverview(): Promise<unknown>
+	updateUnit(uid: string, interfaces: ShUnitUpdate): Promise<void>
+	applyTemplate(uid: string): Promise<void>
+	setTriggerEnabled(uid: string, enabled: boolean): Promise<void>
+}
+
+export class SmartHomeClient implements SmartHomeBackend {
+	readonly kind = 'rest' as const
 	readonly #endpoint: WebEndpoint
 	readonly #session: FritzSession
 

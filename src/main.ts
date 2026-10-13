@@ -30,7 +30,8 @@ import { Anonymizer, collectTr064, ExchangeLog, reportFileName } from './diagnos
 import { readFile } from 'node:fs/promises'
 import { createRouterState, RouterReader, type ReadProblem, type RouterState } from './router.js'
 import { FritzSession, LoginRefusedError, type WebEndpoint } from './session.js'
-import { SmartHomeClient, SmartHomeError } from './smarthome.js'
+import { SmartHomeClient, SmartHomeError, type SmartHomeBackend } from './smarthome.js'
+import { AhaClient } from './aha.js'
 import { assignNamePrefixes, createSmartHomeState, overviewFingerprint, type SmartHomeState } from './shstate.js'
 import { REMOTE_TR064_PREFIX, Tr064AuthError, Tr064Client, Tr064Fault, TR064_HTTP_PORT } from './tr064.js'
 
@@ -113,7 +114,9 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 	#address: BoxAddress | undefined
 	/** Set once a TR-064 route has been found, cleared to search again after the box was lost. */
 	#reader: RouterReader | undefined
-	#smartHomeClient: SmartHomeClient | undefined
+	#smartHomeClient: SmartHomeBackend | undefined
+	/** Kept to switch to the AHA-HTTP interface when the box has no Smart Home REST API. */
+	#smartHomeEndpoint: WebEndpoint | undefined
 	#routerTimer: NodeJS.Timeout | undefined
 	#smartHomeTimer: NodeJS.Timeout | undefined
 	#followUps: NodeJS.Timeout[] = []
@@ -121,6 +124,8 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 	#routerChecks: NodeJS.Timeout[] = []
 	#routerInFlight = false
 	#smartHomeInFlight = false
+	/** Set when a smart home read has to follow the current one, e.g. after switching to AHA. */
+	#smartHomeAgain = false
 	#lastSlowPoll = 0
 	#lastDeviceInfo = 0
 	/** No router poll before this time, set after a refused login. */
@@ -199,7 +204,7 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 	 * Runs a smart home request on behalf of an action, turning failures into a log entry rather than
 	 * an unhandled rejection, and reads the state back shortly afterwards so feedbacks follow.
 	 */
-	async runSmartHome(name: string, fn: (client: SmartHomeClient) => Promise<void>): Promise<void> {
+	async runSmartHome(name: string, fn: (client: SmartHomeBackend) => Promise<void>): Promise<void> {
 		const client = this.#smartHomeClient
 		if (!client) {
 			this.log('warn', `${name}: smart home is not available`)
@@ -364,9 +369,19 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 		if (client && session) {
 			try {
 				const overview = await client.rawOverview()
-				report.smartHome = { rights: session.rights, overview }
+				report.smartHome = { interface: client.kind, rights: session.rights, overview }
 			} catch (error) {
-				report.smartHome = { error: describe(error) }
+				report.smartHome = { interface: client.kind, error: describe(error) }
+			}
+			// On boxes with the REST API, also show how the AHA-HTTP interface would see them. That is
+			// how the AHA mapping, needed for older boxes, can be checked against a current one.
+			const endpoint = this.#smartHomeEndpoint
+			if (client.kind === 'rest' && endpoint) {
+				try {
+					report.smartHomeAha = (await new AhaClient(endpoint, session).overview()).units
+				} catch (error) {
+					report.smartHomeAha = { error: describe(error) }
+				}
 			}
 		} else {
 			report.smartHome = { error: 'Smart home is switched off or not configured' }
@@ -394,6 +409,7 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 		this.#session = undefined
 		this.#reader = undefined
 		this.#smartHomeClient = undefined
+		this.#smartHomeEndpoint = undefined
 		this.#reported.clear()
 		this.#problemKinds.clear()
 		this.#lastSlowPoll = 0
@@ -437,6 +453,7 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 		const smartHomeSeconds = Number(this.config.smartHomeInterval)
 		if (smartHomeSeconds > 0) {
 			this.#smartHomeClient = new SmartHomeClient(web, this.#session)
+			this.#smartHomeEndpoint = web
 			this.#smartHomeTimer = setInterval(() => void this.#pollSmartHome(), Math.max(2, smartHomeSeconds) * 1000)
 			void this.#pollSmartHome()
 		}
@@ -643,6 +660,10 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 			this.#smartHomeFailed(error)
 		} finally {
 			this.#smartHomeInFlight = false
+			if (this.#smartHomeAgain) {
+				this.#smartHomeAgain = false
+				void this.#pollSmartHome()
+			}
 		}
 	}
 
@@ -652,16 +673,21 @@ export default class ModuleInstance extends InstanceBase<ModuleSchema> {
 		if (wasAvailable) this.checkFeedbacks('smarthome_available')
 
 		if (error instanceof SmartHomeError && error.isNotAvailable) {
+			const session = this.#session
+			const endpoint = this.#smartHomeEndpoint
+			if (this.#smartHomeClient?.kind === 'rest' && session && endpoint) {
+				// FRITZ!OS before 8.20: no REST API, but the older AHA-HTTP interface does the same job.
+				this.log('info', 'Smart home: this box has no Smart Home REST API, using the AHA-HTTP interface instead')
+				this.#smartHomeClient = new AhaClient(endpoint, session)
+				// This runs inside the failed read, so the next one starts when that has finished.
+				this.#smartHomeAgain = true
+				return
+			}
 			// Nothing will change until the firmware does, so stop asking.
-			this.#logProblem(
-				'smarthome',
-				'missing',
-				'warn',
-				'This box has no Smart Home REST API (FRITZ!OS 8.20 or later is needed)',
-			)
+			this.#logProblem('smarthome', 'missing', 'warn', 'This box offers no smart home interface')
 			if (this.#smartHomeTimer) clearInterval(this.#smartHomeTimer)
 			this.#smartHomeTimer = undefined
-			this.#setStatus('smarthome', InstanceStatus.UnknownWarning, 'Smart home needs FRITZ!OS 8.20 or later')
+			this.#setStatus('smarthome', InstanceStatus.UnknownWarning, 'This box offers no smart home interface')
 			return
 		}
 		if (error instanceof LoginRefusedError) {

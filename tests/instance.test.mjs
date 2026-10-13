@@ -551,16 +551,134 @@ console.log('Unusable address')
 	await instance.destroy()
 }
 
-console.log('Box without Smart Home REST API')
+console.log('Older box: no Smart Home REST API, AHA-HTTP instead')
 {
 	const box = await startFakeBox({ smartHome: false })
 	const { instance, record } = await startInstance(box.port)
-	await waitFor(() => record.logs.some((l) => /no Smart Home REST API/.test(l.message)), 'smart home warning')
+	await waitFor(() => record.variables.smarthome_units >= 6, 'smart home over AHA')
+	await waitFor(() => record.variables.device_connected === 'true', 'router connection')
+	check(
+		'the switch to AHA is logged',
+		record.logs.some((l) => l.level === 'info' && /using the AHA-HTTP interface/.test(l.message)),
+	)
+	check('status ok', lastStatus(record)?.status === 'ok', JSON.stringify(lastStatus(record)))
+	check(
+		'socket values over AHA',
+		record.variables.smarthome_beamer_leinwand_power === 0 &&
+			record.variables.smarthome_beamer_leinwand_voltage === 229.5,
+	)
+	check(
+		'thermostat target over AHA',
+		record.variables.smarthome_heizung_saal_setpoint === 21 && record.variables.smarthome_heizung_saal_battery === 70,
+	)
+	check(
+		'HAN-FUN window contact over AHA',
+		record.variables['smarthome_11934_0059978_1_alert'] === 'open' &&
+			record.variables['smarthome_11934_0059978_1_battery_low'] === 'true',
+	)
+	check(
+		'colour bulb over AHA',
+		record.variables['smarthome_13077_0000060_1_level'] === 80 &&
+			record.variables['smarthome_13077_0000060_1_hue'] === 200,
+	)
+	check(
+		'button of a FRITZ!DECT 440 is its own unit',
+		'smarthome_taster_regie_oben_rechts_last_press' in record.variableDefinitions,
+	)
+	check('humidity of the FRITZ!DECT 440', record.variables.smarthome_taster_regie_humidity === 45)
+	check(
+		'templates over AHA, automatic ones hidden',
+		record.actions.sh_apply_template.options[0].choices
+			.map((c) => c.id)
+			.sort()
+			.join() === 'tmp653A18-38AE7FDE9,tmpD0EF2E-3CE52B246',
+	)
+	check('routine over AHA', feedback(record, 'sh_trigger_enabled', { trigger: 'trg695F2D-3CBF1DC25' }) === true)
+
+	const commands = box.state.ahaState.commands
+	await runAction(record, 'sh_switch', { unit: '08761 0000434', mode: 'toggle' })
+	check(
+		'a FRITZ! socket is switched with setswitchon',
+		commands.at(-1)?.cmd === 'setswitchon' && box.state.ahaState.socketOn === 1,
+	)
+	await waitFor(() => record.variables.smarthome_beamer_leinwand_on === 'true', 'socket state read back', 3000)
+	check('feedback follows over AHA', feedback(record, 'sh_on', { unit: '08761 0000434' }) === true)
+	await runAction(record, 'sh_switch', { unit: '13077 0000060-1', mode: 'off' })
+	check(
+		'a HAN-FUN lamp is switched with setsimpleonoff',
+		commands.at(-1)?.cmd === 'setsimpleonoff' && commands.at(-1)?.onoff === '0',
+	)
+	await runAction(record, 'sh_level', { unit: '13077 0000060-1', mode: 'set', value: 40, switchOn: true })
+	check(
+		'level and switch on in two commands',
+		commands.at(-2)?.cmd === 'setsimpleonoff' &&
+			commands.at(-1)?.cmd === 'setlevelpercentage' &&
+			commands.at(-1)?.level === '40',
+	)
+	await runAction(record, 'sh_color', { unit: '13077 0000060-1', hue: 120, saturation: 50, switchOn: false })
+	check(
+		'colour with setunmappedcolor',
+		commands.at(-1)?.cmd === 'setunmappedcolor' &&
+			commands.at(-1)?.hue === '120' &&
+			commands.at(-1)?.saturation === '128',
+	)
+	await runAction(record, 'sh_setpoint', { unit: 'Heizung Saal', mode: 'increase', value: 0.5 })
+	check('setpoint in half degrees', commands.at(-1)?.cmd === 'sethkrtsoll' && commands.at(-1)?.param === '43')
+	await runAction(record, 'sh_setpoint', { unit: 'Heizung Saal', mode: 'off', value: 0 })
+	check('thermostat off is 253', commands.at(-1)?.param === '253')
+	await runAction(record, 'sh_boost', { unit: 'Heizung Saal', mode: 'on', minutes: 15 })
+	const boostEnd = Number(commands.at(-1)?.endtimestamp)
+	check(
+		'boost with end time',
+		commands.at(-1)?.cmd === 'sethkrboost' && Math.abs(boostEnd - (Math.floor(Date.now() / 1000) + 900)) <= 2,
+	)
+	await runAction(record, 'sh_apply_template', { template: 'tmpD0EF2E-3CE52B246' })
+	check('scenario applied', commands.at(-1)?.cmd === 'applytemplate' && commands.at(-1)?.ain === 'tmpD0EF2E-3CE52B246')
+	await runAction(record, 'sh_trigger', { trigger: 'trg695F2D-3CBF1DC25', mode: 'toggle' })
+	check('routine switched off', commands.at(-1)?.cmd === 'settriggeractive' && commands.at(-1)?.active === '0')
+
+	// An expired session: AHA answers 403, the module logs in again by itself.
+	const logins = box.state.loginAttempts
+	box.state.sids.clear()
+	await runAction(record, 'refresh', {})
+	check(
+		'expired SID is renewed over AHA too',
+		box.state.loginAttempts === logins + 1 && record.variables.smarthome_units >= 6,
+	)
+
+	const response = await instance.handleHttpRequest({
+		baseUrl: '',
+		headers: {},
+		hostname: '',
+		ip: '',
+		method: 'GET',
+		originalUrl: '',
+		path: '/diagnostics',
+		query: {},
+	})
+	const report = JSON.parse(response.body)
+	check(
+		'the report names the AHA interface and holds its lists',
+		report.smartHome.interface === 'aha' && report.smartHome.overview.devicelist.device.length >= 6,
+	)
+	check(
+		'device names are masked in the AHA lists',
+		!response.body.includes('Heizung Saal') && !response.body.includes('Beamer'),
+	)
+	await instance.destroy()
+	await box.close()
+}
+
+console.log('Box with no smart home interface at all')
+{
+	const box = await startFakeBox({ smartHome: false, aha: false })
+	const { instance, record } = await startInstance(box.port)
+	await waitFor(() => record.logs.some((l) => /offers no smart home interface/.test(l.message)), 'smart home warning')
 	await waitFor(() => record.variables.device_connected === 'true', 'router connection')
 	check('router still works', record.variables.device_connected === 'true')
 	check(
-		'the missing API is explained',
-		record.logs.some((l) => l.level === 'warn' && /8\.20/.test(l.message)),
+		'the missing interface is explained',
+		record.logs.some((l) => l.level === 'warn' && /no smart home interface/.test(l.message)),
 	)
 	check(
 		'status is a warning, not an error',

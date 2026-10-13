@@ -19,6 +19,9 @@ const { listFilePath, connectedProvider, randomWlanPassword, wlanPasswordProblem
 )
 const { hasMobileHardware, mobileConnected } = await import(`${D}/router.js`)
 const { diagnosticsUrl } = await import(`${D}/actions.js`)
+const { parseXml, child, childText } = await import(`${D}/xml.js`)
+const { mapAha, ahaSetPoint, ahaSetPointParam } = await import(`${D}/aha.js`)
+const { ahaDeviceList, ahaTemplateList, ahaTriggerList, initialAhaState } = await import('./aha-fixture.mjs')
 const { Anonymizer, scrubPath, reportFileName, ExchangeLog } = await import(`${D}/diagnostics.js`)
 const { wlanKeys, hasWan2, accessTypeLabel } = await import(`${D}/variables.js`)
 const { initialOverview } = await import('./fakebox.mjs')
@@ -425,6 +428,98 @@ eq(
 	diagnosticsUrl('$(internal:bind_ip)', '', '$(internal:bind_port)', '/x'),
 	'http://127.0.0.1:8000/x',
 )
+
+// --- XML parser ---
+const doc = parseXml(
+	'<?xml version="1.0"?><!-- c --><a x="1" y=\'2\'><b>T &amp; U</b><c/><d><![CDATA[<raw>]]></d><e>x</f></e><g>after</g></a>',
+)
+const a = child(doc, 'a')
+eq('attributes in both quote styles', a?.attributes, { x: '1', y: '2' })
+eq('text with entities', childText(a, 'b'), 'T & U')
+eq('self-closing element', child(a, 'c')?.children.length, 0)
+eq('CDATA', childText(a, 'd'), '<raw>')
+eq('a stray closing tag is ignored', childText(a, 'g'), 'after')
+
+// --- AHA mapping ---
+eq(
+	'AHA setpoints',
+	[ahaSetPoint(42), ahaSetPoint(253), ahaSetPoint(254), ahaSetPoint(undefined)],
+	[{ mode: 'temperature', celsius: 21 }, { mode: 'off' }, { mode: 'on' }, { mode: 'unknown' }],
+)
+eq(
+	'AHA setpoint parameters',
+	[
+		ahaSetPointParam({ mode: 'temperature', celsius: 21.5 }),
+		ahaSetPointParam({ mode: 'off' }),
+		ahaSetPointParam({ mode: 'temperature', celsius: 40 }),
+	],
+	[43, 253, 56],
+)
+const aha = mapAha(ahaDeviceList(initialAhaState()), ahaTemplateList(), ahaTriggerList(initialAhaState()))
+const ahaUnit = (uid) => aha.overview.units.find((unit) => unit.UID === uid)
+eq('AHA devices: HAN-FUN parents are devices, not units', aha.overview.devices.map((d) => d.UID).sort(), [
+	'08761 0000434',
+	'09995 0123456',
+	'09995 1040598',
+	'11934 0059978',
+	'13077 0000060',
+])
+eq(
+	'HAN-FUN unit belongs to its device',
+	[ahaUnit('11934 0059978-1')?.deviceUid, ahaUnit('11934 0059978-1')?.unitType],
+	['11934 0059978', 'windowOpenCloseDetector'],
+)
+eq('the device lists its units', aha.overview.devices.find((d) => d.UID === '11934 0059978')?.unitUids, [
+	'11934 0059978-1',
+])
+eq('window contact open', ahaUnit('11934 0059978-1')?.interfaces.alertInterface?.alerts, ['open'])
+eq(
+	'socket: values and switch kind',
+	[
+		ahaUnit('08761 0000434')?.interfaces.multimeterInterface?.voltage,
+		ahaUnit('08761 0000434')?.unitType,
+		aha.switchKinds.get('08761 0000434'),
+	],
+	[229512, 'avmPlugSocket', 'switch'],
+)
+eq('names with entities', ahaUnit('08761 0000434')?.name, 'Beamer & Leinwand')
+eq(
+	'bulb: simpleonoff, level in percent, colour',
+	[
+		aha.switchKinds.get('13077 0000060-1'),
+		ahaUnit('13077 0000060-1')?.interfaces.levelControlInterface?.level,
+		ahaUnit('13077 0000060-1')?.interfaces.colorControlInterface?.hsColor,
+	],
+	['simpleonoff', 80, { hue: 200, saturation: 180 }],
+)
+eq(
+	'thermostat: real degrees',
+	[
+		ahaUnit('09995 0123456')?.interfaces.temperatureInterface?.celsius,
+		ahaUnit('09995 0123456')?.interfaces.thermostatInterface?.comfortTemperature,
+	],
+	[19.5, { mode: 'temperature', celsius: 21 }],
+)
+eq(
+	'button unit of the FRITZ!DECT 440',
+	[ahaUnit('09995 1040598-1')?.unitType, ahaUnit('09995 1040598-1')?.interfaces.buttonInterface?.lastEventTime],
+	['avmButton', 1760001234],
+)
+eq(
+	'group unit with its members',
+	[ahaUnit('65:3A:18-900')?.isGroupUnit, aha.overview.groups[0]?.memberUnitUids],
+	[true, ['08761 0000434']],
+)
+eq(
+	'templates: scenario and automatic flag',
+	aha.overview.templates.map((t) => [t.UID, t.template?.isAutoCreated, Boolean(t.scenario)]),
+	[
+		['tmp653A18-38AE7FDE9', false, false],
+		['tmp653A18-AUTO1', true, false],
+		['tmpD0EF2E-3CE52B246', false, true],
+	],
+)
+eq('routines', aha.overview.triggers, [{ UID: 'trg695F2D-3CBF1DC25', name: 'Abends aus', enabled: true }])
 
 console.log(failures === 0 ? '\nAll checks passed' : `\n${failures} check(s) failed`)
 process.exit(failures === 0 ? 0 : 1)

@@ -4,6 +4,7 @@
 import http from 'node:http'
 import https from 'node:https'
 import { readFileSync } from 'node:fs'
+import { ahaCommand, initialAhaState } from './aha-fixture.mjs'
 import { createHash, pbkdf2Sync, randomBytes } from 'node:crypto'
 
 const md5 = (text) => createHash('md5').update(text, 'utf8').digest('hex')
@@ -213,6 +214,9 @@ export async function startFakeBox(options = {}) {
 		nonces: new Set(),
 		soapCalls: [],
 		smartHome: options.smartHome ?? true,
+		/** The old AHA-HTTP interface, which every box has, also those without the REST API. */
+		aha: options.aha ?? true,
+		ahaState: initialAhaState(),
 		wlans: initialWlans(),
 		hosts: initialHosts(),
 		wlanGlobal: 1,
@@ -476,6 +480,15 @@ export async function startFakeBox(options = {}) {
 				return send(200, sessionInfo(sid))
 			}
 			return send(200, sessionInfo('0000000000000000'))
+		}
+
+		if (url.pathname === '/webservices/homeautoswitch.lua') {
+			if (!state.aha) return send(404, 'Not Found', 'text/html')
+			// AHA takes the session id as a query parameter and answers a bad one with 403.
+			if (!state.sids.has(url.searchParams.get('sid'))) return send(403, 'Forbidden', 'text/plain')
+			const answer = ahaCommand(state.ahaState, url.searchParams)
+			if (answer === undefined) return send(400, 'Bad Request', 'text/plain')
+			return send(200, answer, answer.startsWith('<') ? 'text/xml' : 'text/plain; charset=utf-8')
 		}
 
 		if (url.pathname.startsWith('/api/v0/smarthome/')) {
